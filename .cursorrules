@@ -1,0 +1,49 @@
+# Regras de Desenvolvimento Fullstack (Antigravity)
+
+Este arquivo define as regras fundamentais para o desenvolvimento fullstack neste workspace.
+
+## Geral
+- **Linguagem**: Preferencialmente TypeScript para Frontend e Go/PHP para Backend conforme o projeto.
+- **Ambiente**: Sempre utilize o ambiente Conda configurado (`conda activate base` ou ambiente específico).
+- **WSL Linux**: Todos os caminhos de arquivo devem ser no formato Linux/POSIX.
+
+## Frontend (React + Vite + Tailwind)
+- Use componentes funcionais com Hooks.
+- Mantenha estilos centralizados via Tailwind CSS.
+- Priorize a estética: Designs modernos, gradientes suaves e micro-animações.
+- Não use placeholders; gere imagens reais se necessário.
+
+## Backend (Laravel + SQLite3)
+- Utilize as melhores práticas do Laravel (ELOQUENT, Service Layer).
+- Mantenha o SQLite3 para desenvolvimento rápido e local.
+- Siga os padrões de PSR-12 para PHP.
+
+## Backend (Go)
+- Estrutura modular e código idiomático (Go modules).
+- Testes unitários integrados.
+
+## Commits e Documentação
+- Commits devem seguir o padrão Conventional Commits.
+- Sempre atualize o `README.md` ao adicionar novas funcionalidades.
+
+---
+
+# Regras de Teste (Github Actions Style)
+
+Sempre realize testes como se estivessem rodando em um CI.
+
+## Regras de Execução
+- **Antes de qualquer commit/push**: Rode a suíte de testes completa do componente alterado.
+- **Isolamento**: Garanta que os testes não dependam de estado externo persistente (use transações de banco de dados ou mocks).
+- **Padronização**:
+  - Laravel: `php artisan test`
+  - React: `npm test` ou `vitest`
+  - Go: `go test ./...`
+  - Python: `pytest` ou `python -m unittest discover`
+
+## Verificação de Lint
+- Execute ferramentas de lint (ESLint, PHPStan, GolangCI-Lint, Ruff/Flake8) antes de dar a tarefa como concluída.
+- Falhas de lint devem ser tratadas como falhas de teste.
+
+## Simulação de CI
+- Ao validar uma tarefa, descreva os passos de verificação de forma clara, similar a um log do Github Actions.
