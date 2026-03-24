@@ -14,6 +14,20 @@ export default defineConfig({
     // Make environment variables available to the frontend
     'process.env': JSON.stringify(process.env),
   },
+  build: {
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-charts': ['recharts'],
+          'vendor-ui': ['framer-motion', 'lucide-react'],
+          'vendor-i18n': ['i18next', 'react-i18next', 'i18next-browser-languagedetector'],
+          'vendor-state': ['zustand', 'axios'],
+        },
+      },
+    },
+  },
   server: {
     // Proxy API requests to the Flask backend during development
     // Uses VITE_API_URL from .env.development (default: localhost:5000)

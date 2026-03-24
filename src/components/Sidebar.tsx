@@ -8,7 +8,8 @@ import {
     HelpCircle,
     Moon,
     Sun,
-    Code
+    Code,
+    Bell
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
@@ -34,8 +35,8 @@ const Sidebar = () => {
     const navItems = [
         { label: t('sidebar.dashboard'), icon: LayoutDashboard, path: '/' },
         { label: t('sidebar.reports'), icon: FileText, path: '/reports', permissionKey: 'reports' },
-        // Cadastros: para viewer, visível se tiver pelo menos uma dessas permissões: cameras, users ou audit
         { label: t('sidebar.settings'), icon: Settings, path: '/cadastros', permissionKey: 'cadastros' },
+        { label: 'Webhooks', icon: Bell, path: '/webhooks', permissionKey: 'api_docs' },
         { label: t('sidebar.api_docs'), icon: Code, path: '/api-docs', permissionKey: 'api_docs' },
     ];
 

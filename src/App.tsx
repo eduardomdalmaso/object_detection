@@ -11,6 +11,7 @@ import api from '@/lib/api';
 const Cadastros = lazy(() => import('@/pages/Cadastros'));
 const Reports = lazy(() => import('@/pages/Reports'));
 const ApiDocs = lazy(() => import('@/pages/ApiDocs'));
+const WebhookSettings = lazy(() => import('@/pages/WebhookSettings'));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -129,6 +130,14 @@ function App() {
                             element={
                                 <ProtectedPageRoute pageKey="api_docs">
                                     <Suspense fallback={<PageLoader />}><ApiDocs /></Suspense>
+                                </ProtectedPageRoute>
+                            }
+                        />
+                        <Route
+                            path="/webhooks"
+                            element={
+                                <ProtectedPageRoute pageKey="api_docs">
+                                    <Suspense fallback={<PageLoader />}><WebhookSettings /></Suspense>
                                 </ProtectedPageRoute>
                             }
                         />

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { useCameraStore } from '@/store/useCameraStore';
 
@@ -130,8 +130,8 @@ const Dashboard = () => {
             </div>
 
             {/* Camera/Mosaic Grid */}
-            <div className="overflow-x-auto pb-3 -mx-3 px-3">
-                <div className="w-max">
+            <div className="pb-3">
+                <div className="w-full">
                     <PlatformGrid platformFilter={cameraFilter} realtimeData={realtimeData} />
                 </div>
             </div>

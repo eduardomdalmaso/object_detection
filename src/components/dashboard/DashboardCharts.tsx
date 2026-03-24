@@ -127,8 +127,8 @@ function DashboardChartsComponent({ timeFilter, cameraFilter, timeRange }: Dashb
                                 stroke={s.color}
                                 fill="transparent"
                                 strokeWidth={3}
-                                dot={{ fill: s.color, r: 0 }}
-                                activeDot={{ r: 6 }}
+                                dot={{ fill: s.color, r: 4, strokeWidth: 2, stroke: '#fff' }}
+                                activeDot={{ r: 8 }}
                             />
                         ))}
                     </AreaChart>

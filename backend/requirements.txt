@@ -1,3 +1,11 @@
 fastapi
 uvicorn
 sqlalchemy
+opencv-python
+ultralytics
+deepface
+tf-keras
+mediapipe
+numpy
+dlib
+torch

@@ -67,7 +67,7 @@ function VideoStreamComponent({
     const frameTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
 
     // Determine base URL for video stream
-    const baseUrl = import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin;
+    const baseUrl = import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin;
     // Query param: /video_feed?plat=<platform> or just /video_feed for default
     const streamUrl = `${baseUrl}/video_feed${platform ? `?plat=${encodeURIComponent(platform)}` : ''}&t=${refreshKey}`;
 

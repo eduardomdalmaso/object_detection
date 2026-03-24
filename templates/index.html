@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Detecção em Tempo Real</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { background: linear-gradient(135deg, #f8fafc, #f1f5f9); font-family: system-ui, sans-serif; }
+    .card { background: white; border-radius: 20px; box-shadow: 0 10px 30px -15px rgba(0,0,0,0.1); border: 1px solid #e2e8f0; }
+    .video-container { border: 3px solid #3b82f6; border-radius: 20px; overflow: hidden; background: black; position: relative; }
+    .toggle-btn { padding: 12px 28px; border-radius: 9999px; font-weight: 600; transition: all 0.3s; }
+    .active { background-color: #3b82f6 !important; color: white !important; box-shadow: 0 0 0 4px rgba(59,130,246,0.3); }
+    .chart-wrapper { flex: 1; min-height: 420px; position: relative; }
+    #status, #mode-badge { font-size: 0.8rem; padding: 6px 14px; border-radius: 9999px; }
+    #debug { font-size: 12px; background: #1f2937; color: #a5b4fc; padding: 12px; border-radius: 12px; margin-top: 10px; max-height: 200px; overflow-y: auto; }
+    .mode-btn { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+  </style>
+</head>
+<body class="min-h-screen py-12 px-6">
+  <div class="max-w-7xl mx-auto">
+    <div class="text-center mb-10">
+      <h1 class="text-4xl font-bold mb-2">🔍 Detecção em Tempo Real</h1>
+      <p class="text-slate-600 text-lg">Emoções • Sonolência • Celular • Mão (MediaPipe) • Cigarro</p>
+    </div>
+
+    <div class="flex justify-center gap-4 mb-6">
+      <button onclick="switchSource('rtsp')" id="btn-rtsp" class="toggle-btn active bg-white border-2 border-blue-500 text-blue-600">📡 IP Camera (RTSP)</button>
+      <button onclick="switchSource('webcam')" id="btn-webcam" class="toggle-btn bg-white border-2 border-gray-300 text-gray-700">📱 Browser Webcam</button>
+    </div>
+
+    <div class="flex justify-center gap-3 mb-10 flex-wrap">
+      <button onclick="switchMode('emotion')" id="btn-emotion" class="mode-btn toggle-btn active bg-white border-2 border-emerald-500 text-emerald-600 flex items-center gap-2">😀 Emoções</button>
+      <button onclick="switchMode('sleeping')" id="btn-sleeping" class="mode-btn toggle-btn bg-white border-2 border-amber-500 text-amber-600 flex items-center gap-2">😴 Sonolência</button>
+      <button onclick="switchMode('phone')" id="btn-phone" class="mode-btn toggle-btn bg-white border-2 border-red-500 text-red-600 flex items-center gap-2">📱 Celular</button>
+      <button onclick="switchMode('hand')" id="btn-hand" class="mode-btn toggle-btn bg-white border-2 border-purple-500 text-purple-600 flex items-center gap-2">✋ Mão (MediaPipe)</button>
+      <button onclick="switchMode('cigarette')" id="btn-cigarette" class="mode-btn toggle-btn bg-white border-2 border-pink-500 text-pink-600 flex items-center gap-2">🚬 Cigarro</button>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-10">
+      <div class="card p-8 flex flex-col">
+        <div class="flex justify-between items-center mb-6">
+          <h2 class="text-2xl font-semibold">📹 Feed da Câmera ao Vivo</h2>
+          <div class="flex gap-3">
+            <span id="status" class="bg-emerald-100 text-emerald-700 font-medium">Processando</span>
+            <span id="mode-badge" class="bg-blue-100 text-blue-700 font-medium">Modo: Emoções</span>
+          </div>
+        </div>
+        <div class="video-container flex-1 relative">
+          <img id="rtspFeed" src="/video_feed" class="w-full h-full object-contain">
+          <img id="annotatedFeed" class="w-full h-full object-contain hidden">
+          <video id="webcamVideo" class="hidden w-full h-full object-contain" autoplay playsinline></video>
+        </div>
+        <p class="text-xs text-slate-500 mt-4 text-center" id="source-info">RTSP • Resolução: 854×480</p>
+      </div>
+
+      <div class="card p-8 flex flex-col">
+        <h2 class="text-2xl font-semibold mb-6">📊 Estatísticas em Tempo Real</h2>
+        <div class="chart-wrapper">
+          <canvas id="emotionChart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const BASE_URL = window.location.origin;
+    let chart = new Chart(document.getElementById('emotionChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Feliz', 'Triste', 'Raiva', 'Surpresa', 'Neutro', 'Medo', 'Nojo'],
+        datasets: [{
+          label: 'Porcentagem',
+          data: [0,0,0,0,0,0,0],
+          backgroundColor: ['#22c55e','#3b82f6','#ef4444','#eab308','#64748b','#8b5cf6','#f97316'],
+          borderRadius: 12,
+          barThickness: 42
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, max: 100 } },
+        plugins: { legend: { display: false } }
+      }
+    });
+
+    let currentSource = 'rtsp';
+    let currentMode = 'emotion';
+    let videoStream = null;
+    let processingInterval = null;
+    let isProcessing = false;
+
+    const rtspImg = document.getElementById('rtspFeed');
+    const annotatedImg = document.getElementById('annotatedFeed');
+    const webcamVideo = document.getElementById('webcamVideo');
+    const statusEl = document.getElementById('status');
+    const modeBadge = document.getElementById('mode-badge');
+
+    function updateChart(labels, data, title = 'Distribuição (%)') {
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = data;
+      chart.data.datasets[0].label = title;
+      chart.update();
+    }
+
+    function updateModeBadge(mode) {
+      currentMode = mode;
+      const texts = { emotion: "Modo: Emoções", sleeping: "Modo: Sonolência", phone: "Modo: Celular", hand: "Modo: Mão Levantada", cigarette: "Modo: Cigarro" };
+      const colors = { emotion: "bg-emerald-100 text-emerald-700", sleeping: "bg-amber-100 text-amber-700", phone: "bg-red-100 text-red-700", hand: "bg-purple-100 text-purple-700", cigarette: "bg-pink-100 text-pink-700" };
+      modeBadge.textContent = texts[mode] || "Modo Desconhecido";
+      modeBadge.className = `${colors[mode] || "bg-gray-100 text-gray-700"} font-medium`;
+    }
+
+    async function switchMode(mode) {
+      if (currentMode === mode) return;
+      try {
+        const res = await fetch(`${BASE_URL}/set_mode`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ mode }) });
+        const data = await res.json();
+        if (data.status === 'success') {
+          document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+          document.getElementById(`btn-${mode}`).classList.add('active');
+          updateModeBadge(mode);
+        }
+      } catch(e) { console.error(e); }
+    }
+
+    function handleStats(stats) {
+      if (currentMode === 'emotion') {
+        updateChart(['Feliz', 'Triste', 'Raiva', 'Surpresa', 'Neutro', 'Medo', 'Nojo'], [stats.happy||0, stats.sad||0, stats.angry||0, stats.surprised||stats.surprise||0, stats.neutral||0, stats.fear||0, stats.disgust||0]);
+      } else if (currentMode === 'sleeping') {
+        updateChart(['Alerta', 'Sonolento'], [stats.alert||0, stats.drowsy||0], 'Estado (%)');
+      } else if (currentMode === 'phone') {
+        updateChart(['Sem Celular', 'Celular'], [stats.no_phone||0, stats.phone||0], 'Detecção (%)');
+      } else if (currentMode === 'hand') {
+        updateChart(['Mão Levantada', 'Normal'], [stats.up||0, stats.down||0], 'Mão Acima da Cabeça (%)');
+      } else if (currentMode === 'cigarette') {
+        updateChart(['Sem Cigarro', 'Cigarro'], [stats.no_cigarette||0, stats.cigarette||0], 'Detecção (%)');
+      }
+    }
+
+    async function processFrame() {
+      if (isProcessing || Date.now() - (window.lastSent || 0) < 200) return;
+      isProcessing = true; window.lastSent = Date.now();
+      const canvas = document.createElement('canvas'); canvas.width = 854; canvas.height = 480;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(webcamVideo, 0, 0, 854, 480);
+      const base64 = canvas.toDataURL('image/jpeg', 0.65);
+      try {
+        const res = await fetch(`${BASE_URL}/process_frame`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ frame: base64 }) });
+        const data = await res.json();
+        if (data.image) annotatedImg.src = data.image;
+        if (data.stats) handleStats(data.stats);
+        if (data.current_mode) updateModeBadge(data.current_mode);
+      } catch(e) { console.error(e); }
+      isProcessing = false;
+    }
+
+    async function switchSource(source) {
+      currentSource = source;
+      document.getElementById('btn-rtsp').classList.toggle('active', source === 'rtsp');
+      document.getElementById('btn-webcam').classList.toggle('active', source === 'webcam');
+      document.getElementById('source-info').textContent = source === 'rtsp' ? 'RTSP • Resolução: 854×480' : '📱 Browser Webcam';
+      if (processingInterval) clearInterval(processingInterval);
+      if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+      rtspImg.classList.toggle('hidden', source !== 'rtsp');
+      annotatedImg.classList.toggle('hidden', source === 'rtsp');
+      webcamVideo.classList.toggle('hidden', source === 'rtsp');
+      if (source === 'rtsp') {
+        rtspImg.src = `${BASE_URL}/video_feed?${Date.now()}`;
+      } else {
+        videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 854, height: 480 } });
+        webcamVideo.srcObject = videoStream;
+        await webcamVideo.play();
+        processingInterval = setInterval(processFrame, 80);
+      }
+    }
+
+    // 🔥 RTSP Auto Stats (sab modes supported)
+    setInterval(() => {
+      if (currentSource === 'rtsp') {
+        fetch(`${BASE_URL}/stats`).then(r => r.json()).then(data => {
+          if (Object.keys(data).length > 0) handleStats(data);
+        }).catch(() => {});
+      }
+    }, 1400);
+
+    window.onload = () => {
+      switchSource('rtsp');
+      updateModeBadge('emotion');
+    };
+  </script>
+</body>
+</html>

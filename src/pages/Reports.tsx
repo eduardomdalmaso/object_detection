@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils';
 import api from '@/lib/api';
 import { useCameraStore } from '@/store/useCameraStore';
 import { useTranslation } from 'react-i18next';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface IntegrationLog {
     id: string;
@@ -42,7 +44,7 @@ const OBJECT_COLORS: Record<string, string> = {
 };
 
 const Reports = () => {
-    const { t, i18n } = useTranslation();
+    const { t } = useTranslation();
     const [activeTab, setActiveTab] = useState<'operations' | 'integrations'>('operations');
 
     const cameras = useCameraStore((state: any) => state.cameras);
@@ -118,32 +120,96 @@ const Reports = () => {
         return sortedData.slice(start, start + itemsPerPage);
     }, [sortedData, currentPage, itemsPerPage]);
 
-    const handleExport = async (format: 'PDF' | 'Excel' | 'CSV') => {
+    const handleExport = async (format: 'PDF' | 'CSV') => {
         setIsExporting(true);
         try {
-            const localePref = (i18n?.language || '').toString().toLowerCase().startsWith('pt') ? 'pt_BR' : 'en_US';
-            const exportData = { camera: cameraFilter, object: objectFilter, startDate, endDate, lang: localePref };
-            let endpoint = '';
-            let filename = `relatorio_deteccoes_${new Date().toISOString().slice(0, 10)}`;
-            if (format === 'PDF') { endpoint = '/api/v1/reports/export/pdf'; filename += '.pdf'; }
-            else if (format === 'Excel') { endpoint = '/api/v1/reports/export/excel'; filename += '.xlsx'; }
-            else if (format === 'CSV') { endpoint = '/api/v1/reports/export/csv'; filename += '.csv'; }
-
             if (allData.length === 0) {
                 alert('Não há dados para os filtros selecionados.');
                 setIsExporting(false);
                 return;
             }
-            const response = await api.post(endpoint, exportData, { responseType: 'blob' });
-            const url = window.URL.createObjectURL(new Blob([response.data]));
-            const link = document.createElement('a');
-            link.href = url;
-            link.setAttribute('download', filename);
-            document.body.appendChild(link);
-            link.click();
-            link.parentNode?.removeChild(link);
+
+            const today = new Date().toISOString().slice(0, 10);
+
+            if (format === 'CSV') {
+                const header = ['Data/Hora', 'Câmera', 'Objeto Detectado', 'Confiança (%)'];
+                const rows = sortedData.map((item: any) => [
+                    item.timestamp || '',
+                    item.camera_name || item.camera_id || '',
+                    OBJECT_LABELS[item.object_type] || item.object_type || '',
+                    String(item.confidence ?? 0),
+                ]);
+                const csvContent = [header, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+                const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `relatorio_deteccoes_${today}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+            } else {
+                // PDF via jsPDF + autoTable
+                const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+                // Title
+                doc.setFontSize(18);
+                doc.setFont('helvetica', 'bold');
+                doc.text('Relatorio de Deteccoes', 14, 20);
+
+                // Subtitle
+                doc.setFontSize(10);
+                doc.setFont('helvetica', 'normal');
+                doc.setTextColor(100);
+                doc.text('Object Detection System', 14, 27);
+
+                // Metadata
+                doc.setFontSize(9);
+                doc.setTextColor(60);
+                const camLabel = cameraFilter === 'all' ? 'Todas as cameras' : cameraFilter;
+                const objLabel = objectFilter === 'all' ? 'Todos os objetos' : (OBJECT_LABELS[objectFilter] || objectFilter);
+                doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, 14, 35);
+                doc.text(`Camera: ${camLabel}  |  Objeto: ${objLabel}  |  Total: ${sortedData.length} registro(s)`, 14, 40);
+                if (startDate || endDate) {
+                    doc.text(`Periodo: ${startDate || '—'} ate ${endDate || '—'}`, 14, 45);
+                }
+
+                // Table
+                const tableData = sortedData.map((item: any) => [
+                    item.timestamp || '—',
+                    item.camera_name || item.camera_id || '—',
+                    OBJECT_LABELS[item.object_type] || item.object_type || '—',
+                    `${item.confidence ?? 0}%`,
+                ]);
+
+                autoTable(doc, {
+                    startY: startDate || endDate ? 50 : 45,
+                    head: [['Data/Hora', 'Camera', 'Objeto Detectado', 'Confianca (%)']],
+                    body: tableData,
+                    styles: { fontSize: 8, cellPadding: 2 },
+                    headStyles: { fillColor: [41, 128, 185], textColor: 255, fontStyle: 'bold' },
+                    alternateRowStyles: { fillColor: [245, 245, 245] },
+                    margin: { left: 14, right: 14 },
+                });
+
+                // Footer
+                const pageCount = doc.getNumberOfPages();
+                for (let i = 1; i <= pageCount; i++) {
+                    doc.setPage(i);
+                    doc.setFontSize(7);
+                    doc.setTextColor(150);
+                    doc.text(
+                        `Pagina ${i} de ${pageCount} — Gerado automaticamente pelo Object Detection System`,
+                        14,
+                        doc.internal.pageSize.height - 8,
+                    );
+                }
+
+                doc.save(`relatorio_deteccoes_${today}.pdf`);
+            }
         } catch (error: any) {
-            alert(`Não foi possível gerar o ${format}. Tente novamente.`);
+            alert(`Nao foi possivel gerar o ${format}. Tente novamente.`);
         } finally {
             setIsExporting(false);
         }
@@ -252,10 +318,10 @@ const Reports = () => {
                             <span className="font-medium">{allData.length} resultado(s)</span>
                         </div>
                         <div className="flex flex-wrap gap-3">
-                            {(['PDF', 'Excel', 'CSV'] as const).map((fmt) => (
+                            {(['PDF', 'CSV'] as const).map((fmt) => (
                                 <button key={fmt} onClick={() => handleExport(fmt)} disabled={isExporting}
                                     className={cn("flex items-center gap-2 px-4 py-2 min-h-[44px] text-sm font-medium bg-background border border-border rounded-lg hover:bg-accent transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed",
-                                        fmt === 'PDF' ? 'text-red-600' : fmt === 'Excel' ? 'text-green-600' : 'text-indigo-600')}>
+                                        fmt === 'PDF' ? 'text-red-600' : 'text-indigo-600')}>
                                     {isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : fmt === 'PDF' ? <FileText className="h-4 w-4" /> : <Download className="h-4 w-4" />}
                                     {isExporting ? 'Exportando...' : `Exportar ${fmt}`}
                                 </button>

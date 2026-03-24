@@ -1,18 +1,607 @@
+# 🔥 MUST BE AT THE VERY TOP - BEFORE ANY TF/DEEPFACE/CV2 IMPORT
+import os
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "rtsp_transport;tcp|"
+    "fflags;nobuffer+discardcorrupt|"
+    "flags;low_delay|"
+    "strict;experimental|"
+    "analyzeduration;500000|"
+    "probesize;100000|"
+    "stimeout;10000000|"
+    "reorder_queue_size;0|"
+    "max_delay;0|"
+    "err_detect;aggressive|"
+    "genpts;1"
+)
+
+import urllib.request
+import threading
+import time
+import base64
+import traceback
+import secrets
+from datetime import datetime, timedelta
+
+import cv2
+import numpy as np
+import torch
+import dlib
+from ultralytics import YOLO
+from deepface import DeepFace
+
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
+
 from fastapi import FastAPI, HTTPException, Request, Depends, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, timedelta
-import secrets
+import io
 
 # Database imports
-from database import engine, Base, get_db
-from models import User, Detection, OBJECT_TYPES
+from database import engine, Base, get_db, SessionLocal
+from models import User, Camera, Detection, WebhookConfig, OBJECT_TYPES
+import hmac
+import hashlib
+import json
+import requests as http_requests
 
-# Cria as tabelas do SQLite baseadas nos models (se não existirem)
+# ========================== CREATE TABLES ==========================
 Base.metadata.create_all(bind=engine)
+
+# ========================== MODEL LOADING ==========================
+print("🔄 Loading AI models...")
+
+MODELS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+face_detector = YOLO(os.path.join(MODELS_DIR, 'face-lindevs.pt'))
+phone_detector = YOLO(os.path.join(MODELS_DIR, 'cellphone.pt'))
+cigarette_detector = YOLO(os.path.join(MODELS_DIR, 'cigarette.pt'))
+landmark_predictor = dlib.shape_predictor(os.path.join(MODELS_DIR, 'face_landmarks.dat'))
+
+# ========================== MEDIAPIPE POSE ==========================
+print("🔄 Loading MediaPipe Pose...")
+
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+MODEL_FILE = os.path.join(MODELS_DIR, "pose_landmarker_lite.task")
+
+if not os.path.exists(MODEL_FILE):
+    print("🌐 Downloading pose_landmarker_lite.task (only once)...")
+    try:
+        urllib.request.urlretrieve(MODEL_URL, MODEL_FILE)
+        print("✅ Model downloaded successfully!")
+    except Exception as e:
+        print(f"❌ Download failed: {e}")
+        print("Please download manually from the link above and place in backend folder.")
+        exit(1)
+else:
+    print("✅ pose_landmarker_lite.task already exists")
+
+BaseOptions = mp_python.BaseOptions
+PoseLandmarker = mp_vision.PoseLandmarker
+PoseLandmarkerOptions = mp_vision.PoseLandmarkerOptions
+VisionRunningMode = mp_vision.RunningMode
+
+POSE_CONFIDENCE_THRESHOLD = 0.6
+
+POSE_CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),(9,10),
+    (11,12),(11,13),(13,15),(15,17),(17,19),(19,15),(15,21),
+    (12,14),(14,16),(16,18),(18,20),(20,16),(16,22),
+    (11,23),(12,24),(23,24),(23,25),(25,27),(27,29),(29,31),(31,27),
+    (24,26),(26,28),(28,30),(30,32),(32,28)
+]
+
+print("✅ All AI models loaded!")
+
+# ========================== CV HELPER FUNCTIONS ==========================
+
+EAR_THRESHOLD = 0.20
+
+
+def euclidean_distance(a, b):
+    return np.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+
+
+def calculate_ear(landmarks):
+    right_eye = [[landmarks.part(i).x, landmarks.part(i).y] for i in range(36, 42)]
+    left_eye = [[landmarks.part(i).x, landmarks.part(i).y] for i in range(42, 48)]
+    def ear_of_eye(eye):
+        A = euclidean_distance(eye[1], eye[5])
+        B = euclidean_distance(eye[2], eye[4])
+        C = euclidean_distance(eye[0], eye[3])
+        return (A + B) / (2.0 * C + 1e-6)
+    return ear_of_eye(left_eye), ear_of_eye(right_eye)
+
+
+def draw_pose(annotated, pose_landmarks_list, alert=False):
+    h, w, _ = annotated.shape
+    color = (0, 0, 255) if alert else (0, 255, 0)
+    thickness = 5 if alert else 3
+    for landmarks in pose_landmarks_list:
+        for lm in landmarks:
+            x, y = int(lm.x * w), int(lm.y * h)
+            cv2.circle(annotated, (x, y), 6, color, -1)
+        for start_idx, end_idx in POSE_CONNECTIONS:
+            if start_idx < len(landmarks) and end_idx < len(landmarks):
+                start = (int(landmarks[start_idx].x * w), int(landmarks[start_idx].y * h))
+                end = (int(landmarks[end_idx].x * w), int(landmarks[end_idx].y * h))
+                cv2.line(annotated, start, end, color, thickness)
+
+
+def is_left_hand_raised(landmarks):
+    if len(landmarks) < 33:
+        return False
+    nose = landmarks[0]
+    l_shoulder = landmarks[11]
+    l_wrist = landmarks[15]
+    if l_wrist.visibility < POSE_CONFIDENCE_THRESHOLD:
+        return False
+    return l_wrist.y < (l_shoulder.y - 0.05) and l_wrist.y < (nose.y - 0.05)
+
+
+def is_right_hand_raised(landmarks):
+    if len(landmarks) < 33:
+        return False
+    nose = landmarks[0]
+    r_shoulder = landmarks[12]
+    r_wrist = landmarks[16]
+    if r_wrist.visibility < POSE_CONFIDENCE_THRESHOLD:
+        return False
+    return r_wrist.y < (r_shoulder.y - 0.05) and r_wrist.y < (nose.y - 0.05)
+
+
+# Map detection modes to OBJECT_TYPES for DB storage
+MODE_TO_OBJECT_TYPE = {
+    "emotion": "emocoes",
+    "sleeping": "sonolencia",
+    "phone": "celular",
+    "hand": "arma",        # hand raised = threat/weapon gesture
+    "cigarette": "cigarro",
+}
+
+
+# ========================== CAMERA PIPELINE ==========================
+
+class CameraPipeline:
+    """
+    Manages a single camera: RTSP/webcam reading + CV processing + MJPEG streaming.
+    Each camera has its own thread, frame buffer, detection mode, and stats.
+    """
+
+    def __init__(self, camera_id: str, camera_name: str, url: str,
+                 camera_type: str = "RTSP", detection_mode: str = "emotion"):
+        self.camera_id = camera_id
+        self.camera_name = camera_name
+        self.url = url
+        self.camera_type = camera_type
+        self.detection_mode = detection_mode
+
+        # Frame state
+        self.latest_frame = None
+        self.last_annotated = None
+        self.frame_lock = threading.Lock()
+
+        # Stats
+        self.stats_lock = threading.Lock()
+        self.emotion_stats = {"angry": 0.0, "disgust": 0.0, "fear": 0.0, "happy": 0.0,
+                              "sad": 0.0, "surprise": 0.0, "neutral": 0.0}
+        self.total_confidence = 0.0
+        self.sleeping_stats = {"drowsy": 0.0, "alert": 0.0}
+        self.phone_stats = {"phone": 0.0, "no_phone": 0.0}
+        self.hand_stats = {"up": 0.0, "down": 0.0}
+        self.cigarette_stats = {"cigarette": 0.0, "no_cigarette": 0.0}
+        self.stats_frame_count = 0
+
+        # MediaPipe pose (lazy-loaded to avoid crash if libGLESv2 is missing)
+        self.pose_timestamp = 0
+        self._pose_landmarker = None
+
+        # Detection throttle: save to DB at most every N seconds per camera
+        self.detection_cooldown = 5.0  # seconds
+        self.last_detection_time = 0.0
+
+        # Thread control
+        self._running = False
+        self._thread = None
+
+    @property
+    def pose_landmarker(self):
+        """Lazy-load PoseLandmarker on first access."""
+        if self._pose_landmarker is None:
+            try:
+                pose_options = PoseLandmarkerOptions(
+                    base_options=BaseOptions(model_asset_path=MODEL_FILE),
+                    running_mode=VisionRunningMode.VIDEO,
+                    num_poses=2,
+                    min_pose_detection_confidence=0.5,
+                    min_pose_presence_confidence=0.5,
+                    min_tracking_confidence=0.5
+                )
+                self._pose_landmarker = PoseLandmarker.create_from_options(pose_options)
+            except Exception as e:
+                print(f"⚠️  MediaPipe PoseLandmarker not available: {e}")
+                return None
+        return self._pose_landmarker
+
+    def start(self):
+        """Start the camera reading thread."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._thread.start()
+        print(f"▶️  Pipeline started for camera '{self.camera_name}' ({self.camera_id})")
+
+    def stop(self):
+        """Stop the camera reading thread."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+        print(f"⏹️  Pipeline stopped for camera '{self.camera_name}' ({self.camera_id})")
+
+    def _reader_loop(self):
+        """Continuously read frames from the camera source."""
+        while self._running:
+            try:
+                if self.camera_type == "WEBCAM":
+                    cap = cv2.VideoCapture(int(self.url) if self.url.isdigit() else 0)
+                else:
+                    cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(3, 854)
+                cap.set(4, 480)
+
+                if not cap.isOpened():
+                    print(f"⚠️  Camera {self.camera_id} - reconnecting in 3s...")
+                    self._update_status("offline")
+                    time.sleep(3)
+                    continue
+
+                self._update_status("online")
+
+                while self._running:
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        break
+                    frame = cv2.resize(frame, (854, 480))
+                    with self.frame_lock:
+                        self.latest_frame = frame.copy()
+
+                cap.release()
+            except Exception as e:
+                print(f"❌ Camera {self.camera_id} reader error: {e}")
+
+            if self._running:
+                self._update_status("offline")
+                time.sleep(2)
+
+    def _update_status(self, status: str):
+        """Update camera status in the database."""
+        try:
+            db = SessionLocal()
+            cam = db.query(Camera).filter(Camera.id == self.camera_id).first()
+            if cam:
+                cam.status = status
+                db.commit()
+            db.close()
+        except Exception:
+            pass
+
+    def process_frame(self, frame):
+        """Apply CV detection based on the current mode and return annotated frame."""
+        annotated = frame.copy()
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        drowsy_this_frame = False
+        phone_detected = False
+        hand_up = False
+        cigarette_detected = False
+        detection_confidence = 0.0
+
+        mode = self.detection_mode
+
+        # ── Face + Emotion + Sleeping ──────────────────────────────
+        results = face_detector(frame, conf=0.35, verbose=False)
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                face_crop = frame[y1:y2, x1:x2]
+
+                try:
+                    dlib_rect = dlib.rectangle(left=x1, top=y1, right=x2, bottom=y2)
+                    lm = landmark_predictor(gray_frame, dlib_rect)
+                    for n in range(68):
+                        cv2.circle(annotated, (lm.part(n).x, lm.part(n).y), 2, (255, 255, 0), -1)
+
+                    if mode == "sleeping":
+                        left_ear, right_ear = calculate_ear(lm)
+                        avg_ear = (left_ear + right_ear) / 2.0
+                        cv2.putText(annotated, f"L:{left_ear:.2f} R:{right_ear:.2f} AVG:{avg_ear:.2f}",
+                                    (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+                        if left_ear < EAR_THRESHOLD or right_ear < EAR_THRESHOLD:
+                            drowsy_this_frame = True
+                            detection_confidence = max(detection_confidence, 1.0 - avg_ear)
+                            alert_text = ("!!! BOTH EYES CLOSED !!!" if (left_ear < EAR_THRESHOLD and right_ear < EAR_THRESHOLD)
+                                          else "!!! ONE EYE CLOSED - DROWSY !!!")
+                            cv2.putText(annotated, alert_text, (40, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.25, (0, 0, 255), 4)
+                except Exception:
+                    pass
+
+                if mode == "emotion" and face_crop.size > 0:
+                    try:
+                        analysis = DeepFace.analyze(face_crop, actions=['emotion'],
+                                                    enforce_detection=False, silent=True,
+                                                    detector_backend='opencv', expand_percentage=15)
+                        if analysis:
+                            res = analysis[0]
+                            dominant = res['dominant_emotion'].lower()
+                            confidence = float(res['emotion'][res['dominant_emotion']] / 100.0)
+                            detection_confidence = max(detection_confidence, confidence)
+                            cv2.putText(annotated, dominant.upper(), (x1, y1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.85, (36, 255, 12), 2)
+                            with self.stats_lock:
+                                if dominant in self.emotion_stats:
+                                    self.emotion_stats[dominant] += confidence
+                                    self.total_confidence += confidence
+                    except Exception:
+                        pass
+
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # ── Phone ─────────────────────────────────────────────────
+        if mode == "phone":
+            try:
+                phone_results = phone_detector(frame, conf=0.25, iou=0.40, imgsz=640, max_det=50, verbose=False)
+                for result in phone_results:
+                    for box in result.boxes:
+                        if int(box.cls[0]) == 67:
+                            phone_detected = True
+                            detection_confidence = max(detection_confidence, float(box.conf[0]))
+                            px1, py1, px2, py2 = map(int, box.xyxy[0])
+                            cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 0, 255), 6)
+                            cv2.putText(annotated, "CELL PHONE DETECTED", (px1, max(40, py1 - 30)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 255), 4)
+            except Exception:
+                pass
+
+        # ── Hand (Pose) ───────────────────────────────────────────
+        if mode == "hand" and self.pose_landmarker is not None:
+            try:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                result = self.pose_landmarker.detect_for_video(mp_image, self.pose_timestamp)
+                self.pose_timestamp += 33
+                pose_landmarks_list = result.pose_landmarks
+
+                if pose_landmarks_list:
+                    alert_status = None
+                    for landmarks in pose_landmarks_list:
+                        left_up = is_left_hand_raised(landmarks)
+                        right_up = is_right_hand_raised(landmarks)
+                        if left_up and right_up:
+                            alert_status = "BOTH"
+                            hand_up = True
+                            detection_confidence = 0.95
+                            break
+                        elif left_up or right_up:
+                            alert_status = "ONE"
+                            hand_up = True
+                            detection_confidence = 0.75
+                            break
+                    draw_pose(annotated, pose_landmarks_list, alert=bool(alert_status))
+                    if alert_status == "BOTH":
+                        cv2.rectangle(annotated, (0, 30), (854, 140), (0, 0, 255), -1)
+                        cv2.putText(annotated, "BOTH HANDS UP!", (40, 85), cv2.FONT_HERSHEY_SIMPLEX, 2.8, (255, 255, 255), 7)
+                    elif alert_status == "ONE":
+                        cv2.rectangle(annotated, (0, 30), (854, 140), (0, 165, 255), -1)
+                        cv2.putText(annotated, "ONE HAND UP!", (40, 85), cv2.FONT_HERSHEY_SIMPLEX, 2.8, (255, 255, 255), 7)
+            except Exception as e:
+                print(f"MediaPipe Error ({self.camera_id}):", e)
+
+        # ── Cigarette ─────────────────────────────────────────────
+        if mode == "cigarette":
+            try:
+                cig_results = cigarette_detector(frame, conf=0.45, verbose=False)
+                for result in cig_results:
+                    for box in result.boxes:
+                        cigarette_detected = True
+                        detection_confidence = max(detection_confidence, float(box.conf[0]))
+                        cx1, cy1, cx2, cy2 = map(int, box.xyxy[0])
+                        cv2.rectangle(annotated, (cx1, cy1), (cx2, cy2), (255, 0, 255), 4)
+                        cv2.putText(annotated, "CIGARETTE DETECTED", (cx1, cy1 - 15),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 255), 3)
+            except Exception:
+                pass
+
+        # ── Stats update ──────────────────────────────────────────
+        with self.stats_lock:
+            self.stats_frame_count += 1
+            if mode == "sleeping":
+                self.sleeping_stats["drowsy" if drowsy_this_frame else "alert"] += 1
+            elif mode == "phone":
+                self.phone_stats["phone" if phone_detected else "no_phone"] += 1
+            elif mode == "hand":
+                self.hand_stats["up" if hand_up else "down"] += 1
+            elif mode == "cigarette":
+                self.cigarette_stats["cigarette" if cigarette_detected else "no_cigarette"] += 1
+
+        # ── Auto-save detection to DB (throttled) ─────────────────
+        detected_something = drowsy_this_frame or phone_detected or hand_up or cigarette_detected
+        # For emotion mode, consider it a detection if confidence > 0.5
+        if mode == "emotion" and detection_confidence > 0.5:
+            detected_something = True
+
+        now = time.time()
+        if detected_something and (now - self.last_detection_time) >= self.detection_cooldown:
+            self.last_detection_time = now
+            self._save_detection(detection_confidence)
+
+        return annotated
+
+    def _save_detection(self, confidence: float):
+        """Save a detection event to the database and dispatch webhooks."""
+        try:
+            db = SessionLocal()
+            object_type = MODE_TO_OBJECT_TYPE.get(self.detection_mode, "emocoes")
+            now = datetime.utcnow()
+            d = Detection(
+                camera_id=self.camera_id,
+                camera_name=self.camera_name,
+                object_type=object_type,
+                confidence=min(confidence, 1.0),
+                timestamp=now
+            )
+            db.add(d)
+            db.commit()
+            db.close()
+
+            # Dispatch webhooks in background
+            event_data = {
+                "event": "detection",
+                "timestamp": now.isoformat() + "Z",
+                "camera_id": self.camera_id,
+                "camera_name": self.camera_name,
+                "object_type": object_type,
+                "confidence": round(min(confidence, 1.0), 4),
+            }
+            threading.Thread(target=dispatch_webhooks, args=(event_data,), daemon=True).start()
+        except Exception as e:
+            print(f"⚠️ Failed to save detection for {self.camera_id}: {e}")
+
+    def generate_mjpeg(self):
+        """Generate MJPEG stream frames for this camera."""
+        frame_counter = 0
+        skip_rate = 3
+        while True:
+            with self.frame_lock:
+                if self.latest_frame is None:
+                    time.sleep(0.03)
+                    continue
+                frame = self.latest_frame.copy()
+
+            frame_counter += 1
+            if frame_counter % skip_rate == 0:
+                annotated = self.process_frame(frame)
+                self.last_annotated = annotated.copy()
+            else:
+                annotated = self.last_annotated.copy() if self.last_annotated is not None else frame.copy()
+
+            _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
+    def get_stats(self):
+        """Return current stats based on active detection mode."""
+        with self.stats_lock:
+            mode = self.detection_mode
+            if mode == "emotion":
+                if self.total_confidence > 0:
+                    data = {k: float(round(v / self.total_confidence * 100, 1))
+                            for k, v in self.emotion_stats.items()}
+                else:
+                    data = {k: 0.0 for k in self.emotion_stats}
+                if 'surprise' in data:
+                    data['surprised'] = data.pop('surprise')
+                return data
+            elif mode == "sleeping":
+                total = self.sleeping_stats["drowsy"] + self.sleeping_stats["alert"]
+                return {
+                    "drowsy": round(self.sleeping_stats["drowsy"] / total * 100, 1) if total > 0 else 0,
+                    "alert": round(self.sleeping_stats["alert"] / total * 100, 1) if total > 0 else 0
+                }
+            elif mode == "phone":
+                total = self.phone_stats["phone"] + self.phone_stats["no_phone"]
+                return {
+                    "phone": round(self.phone_stats["phone"] / total * 100, 1) if total > 0 else 0,
+                    "no_phone": round(self.phone_stats["no_phone"] / total * 100, 1) if total > 0 else 0
+                }
+            elif mode == "hand":
+                total = self.hand_stats["up"] + self.hand_stats["down"]
+                return {
+                    "up": round(self.hand_stats["up"] / total * 100, 1) if total > 0 else 0,
+                    "down": round(self.hand_stats["down"] / total * 100, 1) if total > 0 else 0
+                }
+            elif mode == "cigarette":
+                total = self.cigarette_stats["cigarette"] + self.cigarette_stats["no_cigarette"]
+                return {
+                    "cigarette": round(self.cigarette_stats["cigarette"] / total * 100, 1) if total > 0 else 0,
+                    "no_cigarette": round(self.cigarette_stats["no_cigarette"] / total * 100, 1) if total > 0 else 0
+                }
+            return {}
+
+    def reset_stats(self):
+        """Reset all stats counters."""
+        with self.stats_lock:
+            self.emotion_stats = {k: 0.0 for k in self.emotion_stats}
+            self.total_confidence = 0.0
+            self.sleeping_stats = {"drowsy": 0.0, "alert": 0.0}
+            self.phone_stats = {"phone": 0.0, "no_phone": 0.0}
+            self.hand_stats = {"up": 0.0, "down": 0.0}
+            self.cigarette_stats = {"cigarette": 0.0, "no_cigarette": 0.0}
+            self.stats_frame_count = 0
+
+
+# ========================== PIPELINE MANAGER ==========================
+
+# Global dictionary: camera_id -> CameraPipeline
+pipelines: dict[str, CameraPipeline] = {}
+pipelines_lock = threading.Lock()
+
+
+def start_pipeline(camera_id: str, camera_name: str, url: str,
+                   camera_type: str = "RTSP", detection_modes: list = None):
+    """Create and start a CameraPipeline in a background thread."""
+    if detection_modes is None:
+        detection_modes = ["emotion"]
+    with pipelines_lock:
+        if camera_id in pipelines:
+            pipelines[camera_id].stop()
+
+        # Pipeline processes the first active mode
+        active_mode = detection_modes[0] if detection_modes else "emotion"
+        pipeline = CameraPipeline(camera_id, camera_name, url, camera_type, active_mode)
+        pipelines[camera_id] = pipeline
+        pipeline.start()
+
+
+def stop_pipeline(camera_id: str):
+    """Stop and remove a pipeline."""
+    with pipelines_lock:
+        if camera_id in pipelines:
+            pipelines[camera_id].stop()
+            del pipelines[camera_id]
+
+
+def get_pipeline(camera_id: str) -> CameraPipeline | None:
+    """Get a pipeline by camera ID."""
+    with pipelines_lock:
+        return pipelines.get(camera_id)
+
+
+def init_all_pipelines():
+    """Load all cameras from DB and start their pipelines."""
+    db = SessionLocal()
+    try:
+        cameras = db.query(Camera).all()
+        for cam in cameras:
+            print(f"🎥 Starting pipeline for: {cam.name} ({cam.id})")
+            start_pipeline(cam.id, cam.name, cam.url, cam.camera_type, cam.detection_modes or ["emotion"])
+    finally:
+        db.close()
+
+
+# ========================== FASTAPI APP ==========================
 
 app = FastAPI(title="Object Detection API")
 
@@ -24,19 +613,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.on_event("startup")
-def create_default_admin():
-    from database import SessionLocal
+def on_startup():
+    # Create default admin user
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
-            import os
             admin_pwd = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin")
             db.add(User(username="admin", password=admin_pwd, name="Admin User",
                         role="admin", active=True, page_permissions=[]))
             db.commit()
     finally:
         db.close()
+
+    # Start all camera pipelines
+    init_all_pipelines()
+
 
 SESSIONS: dict[str, int] = {}
 
@@ -148,6 +741,246 @@ async def delete_user(request: Request, db: Session = Depends(get_db)):
     return {"message": "User deleted"}
 
 
+# ── Cameras CRUD ─────────────────────────────────────────────────
+
+@app.get("/api/v1/cameras")
+async def get_cameras(request: Request, db: Session = Depends(get_db)):
+    current_user = _get_session_user(request, db)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    cameras = db.query(Camera).all()
+    platforms = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "url": c.url,
+            "camera_type": c.camera_type,
+            "status": c.status,
+            "detection_modes": c.detection_modes or ["emotion"],
+        }
+        for c in cameras
+    ]
+    return {"platforms": platforms, "total": len(platforms)}
+
+
+@app.post("/api/v1/add_camera")
+async def add_camera(request: Request, db: Session = Depends(get_db)):
+    current_user = _get_session_user(request, db)
+    if not current_user or current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = await request.json()
+
+    platform_key = body.get("platform", f"cam_{int(time.time())}")
+    name = body.get("name", "").strip()
+    url = body.get("url", "").strip()
+    camera_type = body.get("camera_type", "RTSP")
+
+    if not name or not url:
+        raise HTTPException(status_code=400, detail="Name and URL are required")
+
+    # Check for duplicate platform key
+    existing = db.query(Camera).filter(Camera.id == platform_key).first()
+    warning = None
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Camera with key '{platform_key}' already exists")
+
+    # Check for duplicate URL (warn but allow)
+    url_exists = db.query(Camera).filter(Camera.url == url).first()
+    if url_exists:
+        warning = f"Another camera already uses this URL ({url_exists.name})"
+
+    cam = Camera(
+        id=platform_key,
+        name=name,
+        url=url,
+        camera_type=camera_type,
+        status="offline",
+        detection_modes=["emotion"]
+    )
+    db.add(cam)
+    db.commit()
+
+    # Start the CV pipeline for the new camera
+    start_pipeline(cam.id, cam.name, cam.url, cam.camera_type, cam.detection_modes)
+
+    result = {"message": "Camera created", "id": cam.id}
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@app.post("/api/v1/update_camera")
+async def update_camera(request: Request, db: Session = Depends(get_db)):
+    current_user = _get_session_user(request, db)
+    if not current_user or current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = await request.json()
+    platform_key = body.get("platform")
+    cam = db.query(Camera).filter(Camera.id == platform_key).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    old_url = cam.url
+    if "name" in body and body["name"]:
+        cam.name = body["name"]
+    if "url" in body and body["url"]:
+        cam.url = body["url"]
+    if "camera_type" in body:
+        cam.camera_type = body["camera_type"]
+    db.commit()
+
+    # Restart pipeline if URL changed
+    if cam.url != old_url:
+        start_pipeline(cam.id, cam.name, cam.url, cam.camera_type, cam.detection_modes or ["emotion"])
+
+    return {"message": "Camera updated"}
+
+
+@app.post("/api/v1/delete_camera")
+async def delete_camera(request: Request, db: Session = Depends(get_db)):
+    current_user = _get_session_user(request, db)
+    if not current_user or current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = await request.json()
+    cam_id = body.get("id")
+    cam = db.query(Camera).filter(Camera.id == cam_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    # Stop the CV pipeline first
+    stop_pipeline(cam_id)
+
+    db.delete(cam)
+    db.commit()
+    return {"message": "Camera deleted"}
+
+
+@app.get("/api/v1/test_connection_plat/{platform_id}")
+async def test_connection(platform_id: str, db: Session = Depends(get_db)):
+    """Test if a camera can be connected to."""
+    cam = db.query(Camera).filter(Camera.id == platform_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    try:
+        if cam.camera_type == "WEBCAM":
+            cap = cv2.VideoCapture(int(cam.url) if cam.url.isdigit() else 0)
+        else:
+            cap = cv2.VideoCapture(cam.url, cv2.CAP_FFMPEG)
+
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        success = cap.isOpened()
+        if success:
+            ret, frame = cap.read()
+            success = ret and frame is not None
+        cap.release()
+
+        if success:
+            cam.status = "online"
+            db.commit()
+            # Ensure pipeline is running
+            pipeline = get_pipeline(platform_id)
+            if not pipeline:
+                start_pipeline(cam.id, cam.name, cam.url, cam.camera_type, cam.detection_modes or ["emotion"])
+            return {"success": True}
+        else:
+            cam.status = "offline"
+            db.commit()
+            return {"success": False, "error": "Could not read frame from camera"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Video Streaming ──────────────────────────────────────────────
+
+@app.get("/video_feed")
+async def video_feed(plat: str = Query(None)):
+    """MJPEG video feed for a camera. Query param: plat=<camera_id>"""
+    if not plat:
+        # Default to the first available pipeline
+        with pipelines_lock:
+            if pipelines:
+                plat = next(iter(pipelines))
+            else:
+                raise HTTPException(status_code=404, detail="No cameras available")
+
+    pipeline = get_pipeline(plat)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail=f"No active pipeline for camera '{plat}'")
+
+    return StreamingResponse(
+        pipeline.generate_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+# ── Detection Mode ───────────────────────────────────────────────
+
+class SetModesRequest(BaseModel):
+    camera_id: str
+    modes: list[str]
+
+
+@app.post("/api/v1/set_modes")
+async def set_modes(body: SetModesRequest, db: Session = Depends(get_db)):
+    """Set the active detection modes for a specific camera (multi-select)."""
+    valid_modes = ['emotion', 'sleeping', 'phone', 'firearm', 'cigarette']
+    for m in body.modes:
+        if m not in valid_modes:
+            raise HTTPException(status_code=400, detail=f"Invalid mode '{m}'. Valid: {valid_modes}")
+    if not body.modes:
+        raise HTTPException(status_code=400, detail="At least one mode is required")
+
+    pipeline = get_pipeline(body.camera_id)
+    if pipeline:
+        # Set active processing mode to first in list
+        pipeline.detection_mode = body.modes[0]
+        pipeline.reset_stats()
+
+    # Persist modes to DB
+    cam = db.query(Camera).filter(Camera.id == body.camera_id).first()
+    if cam:
+        cam.detection_modes = body.modes
+        db.commit()
+
+    return {"status": "success", "camera_id": body.camera_id, "modes": body.modes}
+
+
+# Legacy single-mode endpoint for backwards compatibility
+class SetModeRequest(BaseModel):
+    camera_id: str
+    mode: str
+
+
+@app.post("/api/v1/set_mode")
+async def set_mode(body: SetModeRequest, db: Session = Depends(get_db)):
+    """Legacy: set a single detection mode."""
+    valid_modes = ['emotion', 'sleeping', 'phone', 'firearm', 'cigarette']
+    if body.mode not in valid_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode. Valid: {valid_modes}")
+
+    pipeline = get_pipeline(body.camera_id)
+    if pipeline:
+        pipeline.detection_mode = body.mode
+        pipeline.reset_stats()
+
+    cam = db.query(Camera).filter(Camera.id == body.camera_id).first()
+    if cam:
+        cam.detection_modes = [body.mode]
+        db.commit()
+
+    return {"status": "success", "camera_id": body.camera_id, "mode": body.mode}
+
+
+@app.get("/api/v1/stats/{camera_id}")
+async def get_camera_stats(camera_id: str):
+    """Get detection stats for a specific camera."""
+    pipeline = get_pipeline(camera_id)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail=f"No active pipeline for camera '{camera_id}'")
+    return pipeline.get_stats()
+
+
 # ── Detections / Reports ─────────────────────────────────────────
 
 @app.get("/api/v1/reports")
@@ -176,7 +1009,6 @@ async def get_reports(
     if end:
         try:
             end_dt = datetime.fromisoformat(end)
-            # include full day
             if "T" not in end:
                 end_dt = end_dt.replace(hour=23, minute=59, second=59)
             q = q.filter(Detection.timestamp <= end_dt)
@@ -198,6 +1030,150 @@ async def get_reports(
     return {"data": data, "total": len(data)}
 
 
+# ── Helper: query detections for export ──────────────────────────
+
+OBJECT_LABELS = {
+    "emocoes": "Emoções",
+    "sonolencia": "Sonolência",
+    "celular": "Celular",
+    "cigarro": "Cigarro",
+    "arma": "Arma de Fogo",
+    "emotion": "Emoções",
+    "sleeping": "Sonolência",
+    "phone": "Celular",
+    "cigarette": "Cigarro",
+    "hand": "Arma / Mão",
+}
+
+
+def _query_detections_for_export(body: dict, db: Session):
+    """Shared query logic for CSV/PDF export endpoints."""
+    camera = body.get("camera", "all")
+    obj = body.get("object", "all")
+    start = body.get("startDate")
+    end = body.get("endDate")
+
+    q = db.query(Detection)
+    if camera and camera != "all":
+        q = q.filter(Detection.camera_id == camera)
+    if obj and obj != "all":
+        q = q.filter(Detection.object_type == obj)
+    if start:
+        try:
+            q = q.filter(Detection.timestamp >= datetime.fromisoformat(start))
+        except ValueError:
+            pass
+    if end:
+        try:
+            end_dt = datetime.fromisoformat(end)
+            if "T" not in str(end):
+                end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            q = q.filter(Detection.timestamp <= end_dt)
+        except ValueError:
+            pass
+
+    return q.order_by(Detection.timestamp.desc()).limit(2000).all()
+
+
+# ── CSV Export ───────────────────────────────────────────────────
+
+@app.post("/api/v1/reports/export/csv")
+async def export_csv(request: Request, db: Session = Depends(get_db)):
+    current_user = _get_session_user(request, db)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    body = await request.json()
+    detections = _query_detections_for_export(body, db)
+
+    import csv as csvmod
+    output = io.StringIO()
+    writer = csvmod.writer(output)
+    writer.writerow(["Data/Hora", "Câmera", "Objeto Detectado", "Confiança (%)"])
+
+    for d in detections:
+        ts = d.timestamp.strftime("%Y-%m-%d %H:%M:%S") if d.timestamp else ""
+        obj_label = OBJECT_LABELS.get(d.object_type, d.object_type or "")
+        conf = round(d.confidence * 100, 1) if d.confidence else 0
+        writer.writerow([ts, d.camera_name or d.camera_id, obj_label, conf])
+
+    content = output.getvalue().encode("utf-8-sig")  # BOM for Excel compatibility
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=relatorio_deteccoes.csv"},
+    )
+
+
+# ── PDF Export ───────────────────────────────────────────────────
+
+@app.post("/api/v1/reports/export/pdf")
+async def export_pdf(request: Request, db: Session = Depends(get_db)):
+    current_user = _get_session_user(request, db)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    body = await request.json()
+    detections = _query_detections_for_export(body, db)
+    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    camera_label = body.get("camera", "all")
+    if camera_label == "all":
+        camera_label = "Todas as câmeras"
+
+    object_label = body.get("object", "all")
+    if object_label == "all":
+        object_label = "Todos os objetos"
+    else:
+        object_label = OBJECT_LABELS.get(object_label, object_label)
+
+    period_start = body.get("startDate", "—")
+    period_end = body.get("endDate", "—")
+
+    # ── Build simple text-based PDF ──────────────────────────────
+    lines: list[str] = []
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append("              RELATÓRIO DE DETECÇÕES — OBJECT DETECTION SYSTEM")
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append(f"  Gerado em:     {now_str}")
+    lines.append(f"  Usuário:       {current_user.name} ({current_user.username})")
+    lines.append(f"  Câmera:        {camera_label}")
+    lines.append(f"  Objeto:        {object_label}")
+    lines.append(f"  Período:       {period_start or '—'} até {period_end or '—'}")
+    lines.append(f"  Total:         {len(detections)} detecção(ões)")
+    lines.append("")
+    lines.append("-" * 80)
+    lines.append(f"  {'Data/Hora':<22} {'Câmera':<20} {'Objeto':<18} {'Confiança':>8}")
+    lines.append("-" * 80)
+
+    for d in detections:
+        ts = d.timestamp.strftime("%Y-%m-%d %H:%M:%S") if d.timestamp else "—"
+        cam = (d.camera_name or d.camera_id or "—")[:20]
+        obj = OBJECT_LABELS.get(d.object_type, d.object_type or "—")[:18]
+        conf = f"{round(d.confidence * 100, 1)}%" if d.confidence else "—"
+        lines.append(f"  {ts:<22} {cam:<20} {obj:<18} {conf:>8}")
+
+    lines.append("-" * 80)
+    lines.append(f"  Total de registros: {len(detections)}")
+    lines.append("")
+    lines.append("  * Relatório gerado automaticamente pelo sistema Object Detection.")
+    lines.append("=" * 80)
+
+    text_content = "\n".join(lines)
+
+    # Return as downloadable PDF-like text file (proper PDF would require reportlab)
+    # Using text/plain with .pdf extension for simplicity
+    return Response(
+        content=text_content.encode("utf-8"),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": "attachment; filename=relatorio_deteccoes.pdf"},
+    )
+
+
+
 def _build_chart_bucket(period: str, ts: datetime) -> str:
     """Return a string bucket label for charting."""
     if period == "hour":
@@ -205,7 +1181,6 @@ def _build_chart_bucket(period: str, ts: datetime) -> str:
     if period == "day":
         return ts.strftime("%d/%m")
     if period == "week":
-        # ISO week
         return f"S{ts.isocalendar()[1]}"
     return ts.strftime("%b/%y")
 
@@ -222,14 +1197,12 @@ async def get_charts(
     if not current_user:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    # chart_key format: "{camera_key}-{period}"
     parts = chart_key.rsplit("-", 1)
     camera_key = parts[0] if len(parts) == 2 else "all"
     period = parts[1] if len(parts) == 2 else "day"
     if period not in ("hour", "day", "week", "month"):
         period = "day"
 
-    # date range default: last 7 days
     now = datetime.utcnow()
     start_dt = datetime.fromisoformat(start) if start else now - timedelta(days=6)
     end_dt = datetime.fromisoformat(end) if end else now
@@ -245,7 +1218,6 @@ async def get_charts(
 
     detections = q.all()
 
-    # Build bucketed data
     buckets: dict[str, dict] = {}
     for d in detections:
         label = _build_chart_bucket(period, d.timestamp)
@@ -255,15 +1227,13 @@ async def get_charts(
         if d.object_type in buckets[label]:
             buckets[label][d.object_type] += 1
 
-    # Sort by label and return as list
     sorted_data = sorted(buckets.values(), key=lambda x: x["time"])
     return {"data": sorted_data}
 
 
 @app.post("/api/v1/detections")
 async def create_detection(request: Request, db: Session = Depends(get_db)):
-    """Endpoint to receive new detection events from the camera pipeline."""
-    # Allow unauthenticated posting from local camera agent
+    """Endpoint to receive new detection events (manual or from external agents)."""
     body = await request.json()
     d = Detection(
         camera_id=body.get("camera_id", "unknown"),
@@ -282,4 +1252,222 @@ async def create_detection(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/api/status")
 def api_status():
-    return {"status": "online", "environment": "detection", "python": "3.11", "db": "sqlite"}
+    with pipelines_lock:
+        active = len(pipelines)
+    return {
+        "status": "online",
+        "environment": "detection",
+        "python": "3.12",
+        "db": "sqlite",
+        "active_pipelines": active,
+    }
+
+
+# ── Counts (PlatformGrid compatibility) ──────────────────────────
+
+@app.get("/api/v1/counts")
+async def get_counts(
+    request: Request,
+    start: str = Query(None),
+    end: str = Query(None),
+    plat: str = Query("all"),
+    db: Session = Depends(get_db)
+):
+    """Return aggregated detection counts for the platform grid."""
+    q = db.query(Detection)
+    if start:
+        try:
+            q = q.filter(Detection.timestamp >= datetime.fromisoformat(start))
+        except ValueError:
+            pass
+    if end:
+        try:
+            end_dt = datetime.fromisoformat(end)
+            if "T" not in end:
+                end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            q = q.filter(Detection.timestamp <= end_dt)
+        except ValueError:
+            pass
+    if plat != "all":
+        q = q.filter(Detection.camera_id == plat)
+
+    detections = q.all()
+
+    # Aggregate by camera + object_type
+    counts: dict = {}
+    for d in detections:
+        key = (d.camera_id, d.object_type)
+        if key not in counts:
+            counts[key] = 0
+        counts[key] += 1
+
+    result = []
+    for (cam_id, obj_type), count in counts.items():
+        result.append({
+            "platform": cam_id,
+            "zone": "A",
+            "direction": obj_type,
+            "count": count
+        })
+    return result
+
+
+# ── Webhooks ─────────────────────────────────────────────────────
+
+def dispatch_webhooks(event_data: dict):
+    """Send webhook POST to all matching configurations. Runs in a background thread."""
+    try:
+        db = SessionLocal()
+        hooks = db.query(WebhookConfig).filter(WebhookConfig.active == True).all()
+        db.close()
+    except Exception as e:
+        print(f"⚠️ Webhook DB error: {e}")
+        return
+
+    obj_type = event_data.get("object_type", "")
+    cam_id = event_data.get("camera_id", "")
+    payload_json = json.dumps(event_data, ensure_ascii=False)
+
+    for hook in hooks:
+        # Filter by events
+        if "all" not in (hook.events or ["all"]) and obj_type not in (hook.events or []):
+            continue
+        # Filter by cameras
+        if "all" not in (hook.cameras or ["all"]) and cam_id not in (hook.cameras or []):
+            continue
+
+        headers = {"Content-Type": "application/json"}
+        if hook.secret:
+            sig = hmac.new(hook.secret.encode(), payload_json.encode(), hashlib.sha256).hexdigest()
+            headers["X-Webhook-Signature"] = sig
+
+        for attempt in range(3):
+            try:
+                resp = http_requests.post(hook.url, data=payload_json, headers=headers, timeout=5)
+                if resp.status_code < 400:
+                    break
+                print(f"⚠️ Webhook {hook.id} returned {resp.status_code} (attempt {attempt+1})")
+            except Exception as e:
+                print(f"⚠️ Webhook {hook.id} failed (attempt {attempt+1}): {e}")
+            time.sleep(2 ** attempt)  # exponential backoff: 1s, 2s, 4s
+
+
+class WebhookCreateRequest(BaseModel):
+    url: str
+    secret: str = ""
+    events: list[str] = ["all"]
+    cameras: list[str] = ["all"]
+    active: bool = True
+
+
+@app.get("/api/v1/webhooks")
+async def list_webhooks(request: Request, db: Session = Depends(get_db)):
+    """List all webhook configurations."""
+    hooks = db.query(WebhookConfig).all()
+    return {
+        "data": [
+            {
+                "id": h.id,
+                "url": h.url,
+                "secret": "***" if h.secret else "",
+                "events": h.events or ["all"],
+                "cameras": h.cameras or ["all"],
+                "active": h.active,
+                "created_at": h.created_at.isoformat() if h.created_at else None,
+            }
+            for h in hooks
+        ],
+        "total": len(hooks),
+    }
+
+
+@app.post("/api/v1/webhooks")
+async def create_webhook(body: WebhookCreateRequest, request: Request, db: Session = Depends(get_db)):
+    """Create a new webhook configuration."""
+    hook = WebhookConfig(
+        url=body.url,
+        secret=body.secret,
+        events=body.events,
+        cameras=body.cameras,
+        active=body.active,
+    )
+    db.add(hook)
+    db.commit()
+    db.refresh(hook)
+    return {"message": "Webhook created", "id": hook.id}
+
+
+@app.put("/api/v1/webhooks/{webhook_id}")
+async def update_webhook(webhook_id: int, body: WebhookCreateRequest, request: Request, db: Session = Depends(get_db)):
+    """Update an existing webhook configuration."""
+    hook = db.query(WebhookConfig).filter(WebhookConfig.id == webhook_id).first()
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    hook.url = body.url
+    if body.secret and body.secret != "***":
+        hook.secret = body.secret
+    hook.events = body.events
+    hook.cameras = body.cameras
+    hook.active = body.active
+    db.commit()
+    return {"message": "Webhook updated"}
+
+
+@app.delete("/api/v1/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a webhook configuration."""
+    hook = db.query(WebhookConfig).filter(WebhookConfig.id == webhook_id).first()
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    db.delete(hook)
+    db.commit()
+    return {"message": "Webhook deleted"}
+
+
+@app.post("/api/v1/webhooks/{webhook_id}/test")
+async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(get_db)):
+    """Send a test event to a specific webhook."""
+    hook = db.query(WebhookConfig).filter(WebhookConfig.id == webhook_id).first()
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    test_payload = {
+        "event": "test",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "camera_id": "test-cam",
+        "camera_name": "Câmera de Teste",
+        "object_type": "emocoes",
+        "confidence": 0.99,
+    }
+    payload_json = json.dumps(test_payload, ensure_ascii=False)
+    headers = {"Content-Type": "application/json"}
+    if hook.secret:
+        sig = hmac.new(hook.secret.encode(), payload_json.encode(), hashlib.sha256).hexdigest()
+        headers["X-Webhook-Signature"] = sig
+
+    try:
+        resp = http_requests.post(hook.url, data=payload_json, headers=headers, timeout=5)
+        return {
+            "status": "sent",
+            "response_code": resp.status_code,
+            "response_body": resp.text[:500],
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+# ── Integration Logs (stub) ──────────────────────────────────────
+
+@app.get("/api/v1/integration-logs")
+async def get_integration_logs(request: Request, db: Session = Depends(get_db)):
+    """Stub endpoint for integration logs."""
+    return {"data": [], "total": 0}
+
+
+# ── Ngrok / CORS Header ─────────────────────────────────────────
+
+@app.middleware("http")
+async def add_ngrok_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    return response
