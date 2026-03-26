@@ -113,6 +113,18 @@ const endpoints = [
   }
 }`,
   },
+  {
+    method: 'WEBHOOK',
+    path: 'GET /sua-url-configurada?event=detection&timestamp=2026-03-24T11:40:00Z...',
+    category: 'Webhooks',
+    description: 'Os eventos são enviados via GET usando query parameters. Configurado na aba Webhooks.',
+    body: `?event=detection
+&timestamp=2026-03-24T11:40:00Z
+&camera_id=cam1
+&camera_name=C\u00e2mera+Entrada
+&object_type=celular
+&confidence=0.92`,
+  },
 ];
 
 const METHOD_COLORS: Record<string, string> = {
@@ -120,6 +132,7 @@ const METHOD_COLORS: Record<string, string> = {
   POST: 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-400',
   PUT: 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-400',
   DELETE: 'bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-400',
+  WEBHOOK: 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-400',
 };
 
 export default function ApiDocs() {
@@ -263,7 +276,7 @@ export default function ApiDocs() {
           </ul>
           <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-100 dark:border-amber-800">
             <p className="text-xs text-amber-700 dark:text-amber-400">
-              <strong>Modos de detecção:</strong> emotion, sleeping, phone, cigarette, firearm
+              <strong>Modos de detecção:</strong> emotion, sleeping, phone, cigarette, handsup
             </p>
           </div>
         </div>

@@ -26,6 +26,10 @@ import base64
 import traceback
 import secrets
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+def get_utc_minus_3():
+    return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
 
 import cv2
 import numpy as np
@@ -38,7 +42,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
-from fastapi import FastAPI, HTTPException, Request, Depends, Query
+from fastapi import FastAPI, HTTPException, Request, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -48,7 +52,7 @@ import io
 
 # Database imports
 from database import engine, Base, get_db, SessionLocal
-from models import User, Camera, Detection, WebhookConfig, OBJECT_TYPES
+from models import User, Camera, Detection, WebhookConfig, IntegrationLog, OBJECT_TYPES
 import hmac
 import hashlib
 import json
@@ -164,7 +168,7 @@ MODE_TO_OBJECT_TYPE = {
     "emotion": "emocoes",
     "sleeping": "sonolencia",
     "phone": "celular",
-    "hand": "arma",        # hand raised = threat/weapon gesture
+    "hand": "maos_ao_alto",   # hand raised detection
     "cigarette": "cigarro",
 }
 
@@ -232,14 +236,25 @@ class CameraPipeline:
                 return None
         return self._pose_landmarker
 
+    def inject_frame(self, frame):
+        """Inject a frame from an external source (e.g., browser WebSocket)."""
+        resized = cv2.resize(frame, (854, 480))
+        with self.frame_lock:
+            self.latest_frame = resized.copy()
+
     def start(self):
-        """Start the camera reading thread."""
+        """Start the camera reading thread (skipped for WEBCAM — uses inject_frame)."""
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self._thread.start()
-        print(f"▶️  Pipeline started for camera '{self.camera_name}' ({self.camera_id})")
+        if self.camera_type == "WEBCAM":
+            # WEBCAM cameras receive frames via WebSocket, no reader thread needed
+            self._update_status("online")
+            print(f"▶️  Pipeline started for WEBCAM '{self.camera_name}' ({self.camera_id}) — awaiting browser frames")
+        else:
+            self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self._thread.start()
+            print(f"▶️  Pipeline started for camera '{self.camera_name}' ({self.camera_id})")
 
     def stop(self):
         """Stop the camera reading thread."""
@@ -307,6 +322,7 @@ class CameraPipeline:
         hand_up = False
         cigarette_detected = False
         detection_confidence = 0.0
+        dominant_emotion = None
 
         mode = self.detection_mode
 
@@ -348,7 +364,9 @@ class CameraPipeline:
                             res = analysis[0]
                             dominant = res['dominant_emotion'].lower()
                             confidence = float(res['emotion'][res['dominant_emotion']] / 100.0)
-                            detection_confidence = max(detection_confidence, confidence)
+                            if confidence > detection_confidence:
+                                detection_confidence = confidence
+                                dominant_emotion = dominant
                             cv2.putText(annotated, dominant.upper(), (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.85, (36, 255, 12), 2)
                             with self.stats_lock:
@@ -446,16 +464,20 @@ class CameraPipeline:
         now = time.time()
         if detected_something and (now - self.last_detection_time) >= self.detection_cooldown:
             self.last_detection_time = now
-            self._save_detection(detection_confidence)
+            self._save_detection(detection_confidence, dominant_emotion=dominant_emotion)
 
         return annotated
 
-    def _save_detection(self, confidence: float):
+    def _save_detection(self, confidence: float, dominant_emotion: str = None):
         """Save a detection event to the database and dispatch webhooks."""
         try:
             db = SessionLocal()
-            object_type = MODE_TO_OBJECT_TYPE.get(self.detection_mode, "emocoes")
-            now = datetime.utcnow()
+            # For emotion mode, save the specific emotion type instead of generic "emocoes"
+            if self.detection_mode == "emotion" and dominant_emotion:
+                object_type = dominant_emotion
+            else:
+                object_type = MODE_TO_OBJECT_TYPE.get(self.detection_mode, "emocoes")
+            now = get_utc_minus_3()
             d = Detection(
                 camera_id=self.camera_id,
                 camera_name=self.camera_name,
@@ -470,7 +492,7 @@ class CameraPipeline:
             # Dispatch webhooks in background
             event_data = {
                 "event": "detection",
-                "timestamp": now.isoformat() + "Z",
+                "timestamp": now.isoformat() + "-03:00",
                 "camera_id": self.camera_id,
                 "camera_name": self.camera_name,
                 "object_type": object_type,
@@ -558,6 +580,9 @@ class CameraPipeline:
 pipelines: dict[str, CameraPipeline] = {}
 pipelines_lock = threading.Lock()
 
+# Tracks the active WebSocket connection per camera_id (singleton per camera)
+webcam_active_ws: dict[str, "WebSocket"] = {}
+
 
 def start_pipeline(camera_id: str, camera_name: str, url: str,
                    camera_type: str = "RTSP", detection_modes: list = None):
@@ -607,7 +632,7 @@ app = FastAPI(title="Object Detection API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://38.247.187.241:5173", "http://38.247.187.241:8000", "http://38.247.187.241", "https://38.247.187.241"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -855,6 +880,45 @@ async def delete_camera(request: Request, db: Session = Depends(get_db)):
     return {"message": "Camera deleted"}
 
 
+@app.post("/api/v1/webcam/claim")
+async def webcam_claim(request: Request, db: Session = Depends(get_db)):
+    """
+    Auto-register a WEBCAM camera for a browser session.
+    Each browser generates a unique session_id (stored in localStorage).
+    First call creates a Camera record; subsequent calls return the existing one.
+    No authentication required — anyone with network access can claim a webcam slot.
+    """
+    body = await request.json()
+    session_id = body.get("session_id", "").strip()
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id must be at least 8 characters")
+
+    # Derive a stable camera_id from the session_id
+    safe_id = "".join(c for c in session_id if c.isalnum() or c == "-")[:20]
+    cam_id = f"webcam-{safe_id}"
+
+    cam = db.query(Camera).filter(Camera.id == cam_id).first()
+    if not cam:
+        # Auto-create the camera record
+        label = session_id[:8].upper()
+        cam = Camera(
+            id=cam_id,
+            name=f"Webcam {label}",
+            url="0",
+            camera_type="WEBCAM",
+            status="offline",
+            detection_modes=["emotion"],
+        )
+        db.add(cam)
+        db.commit()
+        db.refresh(cam)
+        # Start the processing pipeline immediately
+        start_pipeline(cam.id, cam.name, cam.url, cam.camera_type, cam.detection_modes)
+        print(f"🖥️  Auto-created WEBCAM camera '{cam.name}' (session: {session_id[:12]})")
+
+    return {"camera_id": cam.id, "camera_name": cam.name, "created": False}
+
+
 @app.get("/api/v1/test_connection_plat/{platform_id}")
 async def test_connection(platform_id: str, db: Session = Depends(get_db)):
     """Test if a camera can be connected to."""
@@ -924,7 +988,7 @@ class SetModesRequest(BaseModel):
 @app.post("/api/v1/set_modes")
 async def set_modes(body: SetModesRequest, db: Session = Depends(get_db)):
     """Set the active detection modes for a specific camera (multi-select)."""
-    valid_modes = ['emotion', 'sleeping', 'phone', 'firearm', 'cigarette']
+    valid_modes = ['emotion', 'sleeping', 'phone', 'hand', 'cigarette']
     for m in body.modes:
         if m not in valid_modes:
             raise HTTPException(status_code=400, detail=f"Invalid mode '{m}'. Valid: {valid_modes}")
@@ -955,7 +1019,7 @@ class SetModeRequest(BaseModel):
 @app.post("/api/v1/set_mode")
 async def set_mode(body: SetModeRequest, db: Session = Depends(get_db)):
     """Legacy: set a single detection mode."""
-    valid_modes = ['emotion', 'sleeping', 'phone', 'firearm', 'cigarette']
+    valid_modes = ['emotion', 'sleeping', 'phone', 'hand', 'cigarette']
     if body.mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Valid: {valid_modes}")
 
@@ -1037,12 +1101,12 @@ OBJECT_LABELS = {
     "sonolencia": "Sonolência",
     "celular": "Celular",
     "cigarro": "Cigarro",
-    "arma": "Arma de Fogo",
+    "maos_ao_alto": "Mãos ao Alto",
     "emotion": "Emoções",
     "sleeping": "Sonolência",
     "phone": "Celular",
     "cigarette": "Cigarro",
-    "hand": "Arma / Mão",
+    "hand": "Mãos ao Alto",
 }
 
 
@@ -1203,7 +1267,7 @@ async def get_charts(
     if period not in ("hour", "day", "week", "month"):
         period = "day"
 
-    now = datetime.utcnow()
+    now = get_utc_minus_3()
     start_dt = datetime.fromisoformat(start) if start else now - timedelta(days=6)
     end_dt = datetime.fromisoformat(end) if end else now
     if "T" not in (end or ""):
@@ -1223,7 +1287,7 @@ async def get_charts(
         label = _build_chart_bucket(period, d.timestamp)
         if label not in buckets:
             buckets[label] = {"time": label, "emocoes": 0, "sonolencia": 0,
-                               "celular": 0, "cigarro": 0, "arma": 0}
+                               "celular": 0, "cigarro": 0, "maos_ao_alto": 0}
         if d.object_type in buckets[label]:
             buckets[label][d.object_type] += 1
 
@@ -1240,7 +1304,7 @@ async def create_detection(request: Request, db: Session = Depends(get_db)):
         camera_name=body.get("camera_name", "Câmera"),
         object_type=body.get("object_type", "emocoes"),
         confidence=float(body.get("confidence", 0.0)),
-        timestamp=datetime.fromisoformat(body["timestamp"]) if body.get("timestamp") else datetime.utcnow()
+        timestamp=datetime.fromisoformat(body["timestamp"]) if body.get("timestamp") else get_utc_minus_3()
     )
     db.add(d)
     db.commit()
@@ -1343,12 +1407,55 @@ def dispatch_webhooks(event_data: dict):
 
         for attempt in range(3):
             try:
-                resp = http_requests.post(hook.url, data=payload_json, headers=headers, timeout=5)
+                resp = http_requests.get(hook.url, params=event_data, headers=headers, timeout=5)
                 if resp.status_code < 400:
+                    try:
+                        db = SessionLocal()
+                        log = IntegrationLog(
+                            system=f"Webhook: {hook.url}",
+                            status="success",
+                            message=f"Success (HTTP {resp.status_code})"
+                        )
+                        db.add(log)
+                        db.commit()
+                        db.close()
+                    except Exception:
+                        pass
                     break
+                
                 print(f"⚠️ Webhook {hook.id} returned {resp.status_code} (attempt {attempt+1})")
+                
+                if attempt == 2:  # Last attempt
+                    try:
+                        db = SessionLocal()
+                        log = IntegrationLog(
+                            system=f"Webhook: {hook.url}",
+                            status="error",
+                            message=f"Failed with HTTP {resp.status_code}"
+                        )
+                        db.add(log)
+                        db.commit()
+                        db.close()
+                    except Exception:
+                        pass
+                        
             except Exception as e:
                 print(f"⚠️ Webhook {hook.id} failed (attempt {attempt+1}): {e}")
+                
+                if attempt == 2:  # Last attempt
+                    try:
+                        db = SessionLocal()
+                        log = IntegrationLog(
+                            system=f"Webhook: {hook.url}",
+                            status="error",
+                            message=f"Connection error: {str(e)[:150]}"
+                        )
+                        db.add(log)
+                        db.commit()
+                        db.close()
+                    except Exception:
+                        pass
+                        
             time.sleep(2 ** attempt)  # exponential backoff: 1s, 2s, 4s
 
 
@@ -1433,7 +1540,7 @@ async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(
 
     test_payload = {
         "event": "test",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": get_utc_minus_3().isoformat() + "-03:00",
         "camera_id": "test-cam",
         "camera_name": "Câmera de Teste",
         "object_type": "emocoes",
@@ -1446,22 +1553,162 @@ async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(
         headers["X-Webhook-Signature"] = sig
 
     try:
-        resp = http_requests.post(hook.url, data=payload_json, headers=headers, timeout=5)
+        resp = http_requests.get(hook.url, params=test_payload, headers=headers, timeout=5)
+        
+        status_val = "success" if resp.status_code < 400 else "error"
+        log = IntegrationLog(
+            system=f"Webhook Test: {hook.url}",
+            status=status_val,
+            message=f"HTTP {resp.status_code}"
+        )
+        db.add(log)
+        db.commit()
+        
         return {
             "status": "sent",
             "response_code": resp.status_code,
             "response_body": resp.text[:500],
         }
     except Exception as e:
+        log = IntegrationLog(
+            system=f"Webhook Test: {hook.url}",
+            status="error",
+            message=f"Error: {str(e)[:150]}"
+        )
+        db.add(log)
+        db.commit()
         return {"status": "error", "detail": str(e)}
 
 
-# ── Integration Logs (stub) ──────────────────────────────────────
+from models import WebhookConfig, IntegrationLog, Camera, Detection, User, GlobalSettings
+
+# ── Global Settings ─────────────────────────────────────────────
+
+class SettingsRequest(BaseModel):
+    whatsapp: str
+    phone: str
+    support_email: str
+    theme: str
+    logo_url: str | None = None
+    brand_name: str
+    brand_subtitle: str
+
+@app.get("/api/v1/settings")
+async def get_settings(db: Session = Depends(get_db)):
+    """Get global settings, create default if none exists."""
+    settings = db.query(GlobalSettings).first()
+    if not settings:
+        settings = GlobalSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return {
+        "whatsapp": settings.whatsapp,
+        "phone": settings.phone,
+        "supportEmail": settings.support_email,
+        "theme": settings.theme,
+        "logoUrl": settings.logo_url,
+        "brandName": settings.brand_name,
+        "brandSubtitle": settings.brand_subtitle,
+    }
+
+@app.put("/api/v1/settings")
+async def update_settings(body: SettingsRequest, db: Session = Depends(get_db)):
+    """Update global settings."""
+    settings = db.query(GlobalSettings).first()
+    if not settings:
+        settings = GlobalSettings()
+        db.add(settings)
+    
+    settings.whatsapp = body.whatsapp
+    settings.phone = body.phone
+    settings.support_email = body.support_email
+    settings.theme = body.theme
+    settings.logo_url = body.logo_url
+    settings.brand_name = body.brand_name
+    settings.brand_subtitle = body.brand_subtitle
+    
+    db.commit()
+    return {"message": "Settings updated"}
+
+# ── Integration Logs ─────────────────────────────────────────────
 
 @app.get("/api/v1/integration-logs")
 async def get_integration_logs(request: Request, db: Session = Depends(get_db)):
-    """Stub endpoint for integration logs."""
-    return {"data": [], "total": 0}
+    """Return the 100 most recent integration logs."""
+    logs = db.query(IntegrationLog).order_by(IntegrationLog.date.desc()).limit(100).all()
+    data = [
+        {
+            "id": log.id,
+            "system": log.system,
+            "status": log.status,
+            "date": log.date.strftime("%d/%m/%Y %H:%M:%S") if log.date else "",
+            "message": log.message,
+        }
+        for log in logs
+    ]
+    return {"data": data, "total": len(data)}
+
+# ── WebSocket: Browser Webcam ───────────────────────────────────
+
+@app.websocket("/ws/webcam/{camera_id}")
+async def webcam_ws(websocket: WebSocket, camera_id: str):
+    """Receive JPEG frames from the browser webcam and inject into the pipeline.
+    Enforces a singleton connection per camera_id — a new connection replaces the old one.
+    """
+    await websocket.accept()
+
+    # Validate camera exists and is WEBCAM type
+    db = SessionLocal()
+    cam = db.query(Camera).filter(Camera.id == camera_id).first()
+    db.close()
+
+    if not cam or cam.camera_type != "WEBCAM":
+        await websocket.close(code=1008, reason="Camera not found or not WEBCAM type")
+        return
+
+    # ── Singleton enforcement: close previous connection if any ──
+    old_ws = webcam_active_ws.get(camera_id)
+    if old_ws is not None and old_ws is not websocket:
+        try:
+            await old_ws.close(code=1001, reason="Replaced by new connection")
+        except Exception:
+            pass
+    webcam_active_ws[camera_id] = websocket
+
+    # Start/get pipeline
+    with pipelines_lock:
+        if camera_id not in pipelines:
+            modes = cam.detection_modes if cam.detection_modes else ["emotion"]
+            active_mode = modes[0] if modes else "emotion"
+            pipeline = CameraPipeline(camera_id, cam.name, cam.url or "0", "WEBCAM", active_mode)
+            pipelines[camera_id] = pipeline
+            pipeline.start()
+        else:
+            pipeline = pipelines[camera_id]
+            if not pipeline._running:
+                pipeline.start()
+
+    print(f"📹 WebSocket connected for WEBCAM '{camera_id}'")
+
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            # Only process if this WS is still the active one
+            if webcam_active_ws.get(camera_id) is not websocket:
+                break
+            nparr = np.frombuffer(data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                pipeline.inject_frame(frame)
+    except WebSocketDisconnect:
+        print(f"📹 WebSocket disconnected for WEBCAM '{camera_id}'")
+    except Exception as e:
+        print(f"❌ WebSocket error for WEBCAM '{camera_id}': {e}")
+    finally:
+        # Only clean up if this is still the registered active connection
+        if webcam_active_ws.get(camera_id) is websocket:
+            del webcam_active_ws[camera_id]
 
 
 # ── Ngrok / CORS Header ─────────────────────────────────────────

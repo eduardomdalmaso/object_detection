@@ -100,6 +100,19 @@ function App() {
         }
     }, []);
 
+    // Fetch global settings from backend on app load
+    useEffect(() => {
+        useSettingsStore.getState().fetchSettings();
+    }, []);
+
+    // Update browser tab title from brand settings
+    const brandName = useSettingsStore((s) => s.brandName);
+    const brandSubtitle = useSettingsStore((s) => s.brandSubtitle);
+    useEffect(() => {
+        const parts = [brandName, brandSubtitle].filter(Boolean);
+        document.title = parts.length > 0 ? parts.join(' ') : 'Object Detection';
+    }, [brandName, brandSubtitle]);
+
     return (
         <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>

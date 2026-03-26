@@ -10,6 +10,7 @@ export interface Camera {
     status: 'online' | 'offline';
     protocol?: string;
     cameraType?: 'RTSP' | 'RTMP' | 'HTTP' | 'ONVIF' | 'WEBCAM';
+    detection_modes?: string[];
 }
 
 interface CameraState {
@@ -52,7 +53,8 @@ export const useCameraStore = create<CameraState>((set, get) => ({
                     // Treat both backend statuses 'online' and 'live' as online for UI
                     status: (p.status === 'online' || p.status === 'live') ? 'online' : 'offline',
                     protocol: 'RTSP',
-                    cameraType: p.camera_type || 'RTSP'
+                    cameraType: p.camera_type || 'RTSP',
+                    detection_modes: p.detection_modes || ['emotion'],
                 };
             });
             set({ cameras: formattedCameras, isLoading: false });

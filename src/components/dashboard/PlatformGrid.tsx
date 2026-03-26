@@ -1,13 +1,28 @@
-import { useState, useEffect, memo, useMemo, useRef } from "react";
+import { useState, useEffect, memo, useMemo, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { Maximize2, VideoOff, X, Settings2, Crosshair } from "lucide-react";
+import { Maximize2, VideoOff, X, Settings2, Hand, Eye, Smartphone, Smile } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCameraStore } from "@/store/useCameraStore";
 import { DetectionConfigModal } from "./DetectionConfigModal";
+import api from "@/lib/api";
 
 /** Resolve MJPEG base URL */
 function getMjpegBaseUrl(): string {
-  return import.meta.env.DEV ? "http://localhost:8000" : window.location.origin;
+  return "";
+}
+
+/** Generate a persistent browser session ID (stored in localStorage). */
+function getOrCreateSessionId(): string {
+  const KEY = "wc_session_id";
+  let id = localStorage.getItem(KEY);
+  if (!id || id.length < 8) {
+    // Generate a UUID-like random string
+    id = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("");
+    localStorage.setItem(KEY, id);
+  }
+  return id;
 }
 
 /** Delay before connecting stream for newly added cameras */
@@ -18,7 +33,7 @@ const DETECTION_MODES = [
   { key: "sleeping",  label: "Sonolência",   icon: "😴", activeColor: "bg-amber-500/20 border-amber-500 text-amber-700 dark:text-amber-300" },
   { key: "phone",     label: "Celular",      icon: "📱", activeColor: "bg-blue-500/20 border-blue-500 text-blue-700 dark:text-blue-300" },
   { key: "cigarette", label: "Cigarro",      icon: "🚬", activeColor: "bg-red-500/20 border-red-500 text-red-700 dark:text-red-300" },
-  { key: "firearm",   label: "Arma de Fogo", icon: <Crosshair className="w-4 h-4 text-slate-500" strokeWidth={2.5} />, activeColor: "bg-slate-500/20 border-slate-500 text-slate-700 dark:text-slate-300" },
+  { key: "hand",      label: "Mãos ao Alto", icon: <Hand className="w-4 h-4 text-slate-500" strokeWidth={2.5} />, activeColor: "bg-slate-500/20 border-slate-500 text-slate-700 dark:text-slate-300" },
 ];
 
 function MjpegVideoCell({
@@ -27,18 +42,43 @@ function MjpegVideoCell({
   streamRefreshKey,
   objectFit = "cover",
   delayStreamUntil = 0,
+  cameraType = "RTSP",
 }: {
   platformId: string;
   platformName: string;
   streamRefreshKey?: number;
   objectFit?: "cover" | "contain";
   delayStreamUntil?: number;
+  cameraType?: string;
 }) {
+  // Force a fresh key on every mount so remount always gets a new MJPEG URL
   const [hasError, setHasError] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(Date.now());
+  const [refreshKey, setRefreshKey] = useState(() => Date.now());
   const [delayOver, setDelayOver] = useState(delayStreamUntil <= 0 || Date.now() >= delayStreamUntil);
+  const [webcamStatus, setWebcamStatus] = useState<"idle" | "connecting" | "streaming" | "error">("idle");
+  // For WEBCAM: may be overridden by /webcam/claim to a session-specific camera_id
+  const [claimedCamId, setClaimedCamId] = useState<string>(platformId);
   const mjpegBase = getMjpegBaseUrl();
-  const mjpegUrl = `${mjpegBase}/video_feed?plat=${encodeURIComponent(platformId)}&t=${refreshKey}`;
+  // Use the claimed camera_id for WEBCAM so the MJPEG stream follows the auto-assigned camera
+  const mjpegUrl = `${mjpegBase}/video_feed?plat=${encodeURIComponent(
+    cameraType === "WEBCAM" ? claimedCamId : platformId
+  )}&t=${refreshKey}`;
+
+  // Refs for webcam resources
+  const wsRef = useRef<WebSocket | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const intervalRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  // Guard against state updates after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    // Always refresh the MJPEG URL on mount to break browser cache
+    setRefreshKey(Date.now());
+    setHasError(false);
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     setHasError(false);
@@ -70,6 +110,98 @@ function MjpegVideoCell({
     }, 4000);
   };
 
+  // ── Auto-start webcam for WEBCAM cameras ──
+  const stopWebcam = useCallback(() => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+  }, []);
+
+  useEffect(() => {
+    if (cameraType !== "WEBCAM") return;
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.warn("getUserMedia not available — HTTPS required for webcam");
+      if (mountedRef.current) setWebcamStatus("error");
+      return;
+    }
+
+    if (mountedRef.current) setWebcamStatus("connecting");
+
+    // ── Step 1: claim a dedicated camera_id for this browser session ──
+    const sessionId = getOrCreateSessionId();
+    api.post("/api/v1/webcam/claim", { session_id: sessionId })
+      .then((res) => {
+        if (!mountedRef.current) return;
+        const assignedCamId: string = res.data.camera_id;
+        setClaimedCamId(assignedCamId);
+
+        // If a new camera was auto-created, refresh the camera list in the store
+        // so it appears in the Dashboard without requiring F5
+        if (assignedCamId !== platformId) {
+          // Trigger camera store refresh (useCameraStore.fetchCameras)
+          import("@/store/useCameraStore").then(({ useCameraStore }) => {
+            useCameraStore.getState().fetchCameras();
+          });
+        }
+
+        // Refresh MJPEG URL to use the claimed camera_id
+        setRefreshKey(Date.now());
+
+        // ── Step 2: start the camera stream ──
+        const video = document.createElement("video");
+        video.playsInline = true;
+        video.muted = true;
+        videoRef.current = video;
+        const canvas = document.createElement("canvas");
+        canvas.width = 854;
+        canvas.height = 480;
+        canvasRef.current = canvas;
+
+        navigator.mediaDevices.getUserMedia({ video: { width: 854, height: 480, facingMode: "user" }, audio: false })
+          .then((mediaStream) => {
+            if (!mountedRef.current) { mediaStream.getTracks().forEach(t => t.stop()); return; }
+            streamRef.current = mediaStream;
+            video.srcObject = mediaStream;
+            video.play();
+
+            const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/webcam/${assignedCamId}`);
+            ws.binaryType = "arraybuffer";
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+              if (!mountedRef.current) { ws.close(); return; }
+              setWebcamStatus("streaming");
+              intervalRef.current = window.setInterval(() => {
+                if (ws.readyState !== WebSocket.OPEN) return;
+                const ctx = canvas.getContext("2d");
+                if (!ctx) return;
+                ctx.drawImage(video, 0, 0, 854, 480);
+                canvas.toBlob((blob) => {
+                  if (blob && ws.readyState === WebSocket.OPEN) {
+                    blob.arrayBuffer().then(buf => ws.send(buf));
+                  }
+                }, "image/jpeg", 0.65);
+              }, 125);
+            };
+
+            ws.onerror = () => { if (mountedRef.current) setWebcamStatus("error"); };
+            ws.onclose = () => { if (mountedRef.current) setWebcamStatus("idle"); };
+          })
+          .catch((err) => {
+            console.error("Webcam access error:", err);
+            if (mountedRef.current) setWebcamStatus("error");
+          });
+      })
+      .catch((err) => {
+        console.error("Webcam claim error:", err);
+        if (mountedRef.current) setWebcamStatus("error");
+      });
+
+    return () => stopWebcam();
+  }, [cameraType, platformId, stopWebcam]);
+
   const showPlaceholder = hasError || (delayStreamUntil > 0 && !delayOver);
 
   return (
@@ -97,7 +229,9 @@ function MjpegVideoCell({
         <div className="flex flex-col items-center text-slate-500 dark:text-slate-400">
           <VideoOff className="h-10 w-10 mb-2" />
           <span className="text-xs">
-            {delayStreamUntil > 0 && !delayOver ? "..." : platformName}
+            {cameraType === "WEBCAM" && webcamStatus === "error"
+              ? "Webcam requer HTTPS"
+              : delayStreamUntil > 0 && !delayOver ? "..." : platformName}
           </span>
         </div>
       </div>
@@ -118,6 +252,42 @@ function PlatformGridComponent({
   const fetchCameras = useCameraStore((state: any) => state.fetchCameras);
   const [streamRefreshKey, setStreamRefreshKey] = useState(() => Date.now());
   const [detectionModes, setDetectionModes] = useState<Record<string, string[]>>({});
+  
+  const [localStats, setLocalStats] = useState<Record<string, { attention: number, distractions: number, drowsiness: number }>>({});
+
+  useEffect(() => {
+    const fetchLocalStats = async () => {
+      try {
+        const now = new Date();
+        const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0'), d = String(now.getDate()).padStart(2, '0');
+        const today = `${y}-${m}-${d}`;
+        const res = await api.get('/api/v1/reports', { params: { start: today, end: today } });
+        const data = res.data?.data || [];
+        
+        const statsMap: Record<string, { dist: number, drow: number, crit: number }> = {};
+        for(const item of data) {
+           const id = String(item.camera_id || item.camera_name);
+           if (!statsMap[id]) statsMap[id] = { dist: 0, drow: 0, crit: 0 };
+           if (item.object_type === 'celular') statsMap[id].dist++;
+           else if (item.object_type === 'sonolencia') statsMap[id].drow++;
+           else if (item.object_type === 'cigarro' || item.object_type === 'maos_ao_alto') statsMap[id].crit++;
+        }
+
+        const finalStats: Record<string, { attention: number, distractions: number, drowsiness: number }> = {};
+        Object.entries(statsMap).forEach(([id, counts]) => {
+           let penalty = (counts.dist * 2) + (counts.drow * 5) + (counts.crit * 15);
+           let attention = Math.max(0, 100 - penalty);
+           finalStats[id] = { attention, distractions: counts.dist, drowsiness: counts.drow };
+        });
+        setLocalStats(finalStats);
+      } catch (e) {
+        console.error("Failed to fetch local stats in PlatformGrid", e);
+      }
+    };
+    fetchLocalStats();
+    const interval = setInterval(fetchLocalStats, 60000); // refresh every minute
+    return () => clearInterval(interval);
+  }, []);
   const [selectedPlatform, setSelectedPlatform] = useState<{
     id: string;
     name: string;
@@ -184,6 +354,7 @@ function PlatformGridComponent({
         name: nameStr,
         status: c.status ?? "offline",
         detection_modes: modes,
+        cameraType: c.cameraType || "RTSP",
       };
     });
   }, [cameras, detectionModes]);
@@ -261,6 +432,7 @@ function PlatformGridComponent({
                     platformName={platform.name}
                     streamRefreshKey={streamRefreshKey}
                     objectFit="contain"
+                    cameraType={platform.cameraType}
                     delayStreamUntil={
                       newlyAddedPlatformIds.includes(platform.id) && newlyAddedAt
                         ? newlyAddedAt + STREAM_DELAY_MS
@@ -269,56 +441,37 @@ function PlatformGridComponent({
                   />
                 </div>
 
-                {/* Detection Modes — READ-ONLY display */}
-                <div className="px-4 py-3 bg-card dark:bg-slate-800 h-[140px] flex flex-col">
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                        Detecções Ativas
-                      </span>
+                {/* Local KPIs and Configuration Footer */}
+                <div className="px-4 py-3 bg-card dark:bg-slate-800 flex items-center justify-between border-t border-border">
+                  <div className="flex gap-4 items-center">
+                    <div className="flex items-center gap-1.5 text-blue-600 dark:text-blue-400 font-semibold text-sm">
+                      <Eye className="h-4 w-4" />
+                      {localStats[platform.id]?.attention ?? 100}%
                     </div>
-
-                    {/* Read-only mode badges */}
-                    <div className="flex gap-1.5 flex-wrap overflow-hidden max-h-[50px]">
-                    {activeModes.map((modeKey) => {
-                      const mode = DETECTION_MODES.find((m) => m.key === modeKey);
-                      if (!mode) return null;
-                      return (
-                        <span
-                          key={modeKey}
-                          className={cn(
-                            "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium",
-                            mode.activeColor,
-                          )}
-                        >
-                          <span className="text-sm">{mode.icon}</span>
-                          <span className="hidden sm:inline">{mode.label}</span>
-                        </span>
-                      );
-                    })}
-                    {activeModes.length === 0 && (
-                      <span className="text-xs text-muted-foreground italic">Nenhuma detecção ativa</span>
-                    )}
-                  </div>
+                    <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400 text-xs font-medium" title="Distrações (Celular)">
+                      <Smartphone className="h-3.5 w-3.5" />
+                      {localStats[platform.id]?.distractions ?? 0}
+                    </div>
+                    <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400 text-xs font-medium" title="Sonolência">
+                      <Smile className="h-3.5 w-3.5 text-yellow-600" />
+                      {localStats[platform.id]?.drowsiness ?? 0}
+                    </div>
                   </div>
 
-                  {/* Configure button — only way to change modes */}
-                  <div className="mt-auto pt-3 border-t border-slate-100 dark:border-slate-700 flex justify-end">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedPlatform({
-                          id: platform.id,
-                          name: platform.name,
-                          modes: activeModes,
-                        });
-                      }}
-                      className="text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium flex items-center gap-1 transition-colors"
-                    >
-                      <Settings2 className="h-3.5 w-3.5" />
-                      Configurar Detecções
-                    </button>
-                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedPlatform({
+                        id: platform.id,
+                        name: platform.name,
+                        modes: activeModes,
+                      });
+                    }}
+                    className="text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium flex items-center gap-1 transition-colors"
+                  >
+                    <Settings2 className="h-3.5 w-3.5" />
+                    Configurar
+                  </button>
                 </div>
               </div>
             </div>

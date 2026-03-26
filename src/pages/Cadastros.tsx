@@ -208,23 +208,27 @@ export default function Cadastros() {
 
                         <div className="flex justify-end pt-4">
                             <button
-                                    onClick={() => {
-                                    updateSettings({
-                                        whatsapp: localWhatsapp,
-                                        phone: localPhone,
-                                        supportEmail: localSupportEmail,
-                                        brandName: localBrandName,
-                                        brandSubtitle: localBrandSubtitle,
-                                        logoUrl: localLogoUrl
-                                    });
-                                    useAuditStore.getState().addLog({
-                                        userId: user?.id || 'unknown',
-                                        userName: user?.name || 'Unknown',
-                                        action: 'Settings Updated',
-                                        details: `Support numbers updated (Tel: ${localPhone})`,
-                                        category: 'settings'
-                                    });
-                                    alert(t('cadastros.settings.saved'));
+                                    onClick={async () => {
+                                    try {
+                                        await updateSettings({
+                                            whatsapp: localWhatsapp,
+                                            phone: localPhone,
+                                            supportEmail: localSupportEmail,
+                                            brandName: localBrandName,
+                                            brandSubtitle: localBrandSubtitle,
+                                            logoUrl: localLogoUrl
+                                        });
+                                        useAuditStore.getState().addLog({
+                                            userId: user?.id || 'unknown',
+                                            userName: user?.name || 'Unknown',
+                                            action: 'Settings Updated',
+                                            details: `Brand and Support settings updated in the database`,
+                                            category: 'settings'
+                                        });
+                                        alert(t('cadastros.settings.saved'));
+                                    } catch (err) {
+                                        alert("Erro ao salvar configurações!");
+                                    }
                                 }}
                                 className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
                             >

@@ -1,5 +1,5 @@
 import { useState, useEffect, memo } from "react";
-import { X, Check, Loader2, Crosshair } from "lucide-react";
+import { X, Check, Loader2, Hand } from "lucide-react";
 import api from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -8,7 +8,7 @@ const DETECTION_MODES = [
   { key: "sleeping",  label: "Sonolência",     icon: "😴", color: "bg-amber-500/20 border-amber-500 text-amber-700 dark:text-amber-300" },
   { key: "phone",     label: "Celular",        icon: "📱", color: "bg-blue-500/20 border-blue-500 text-blue-700 dark:text-blue-300" },
   { key: "cigarette", label: "Cigarro",        icon: "🚬", color: "bg-red-500/20 border-red-500 text-red-700 dark:text-red-300" },
-  { key: "firearm",   label: "Arma de Fogo",   icon: <Crosshair className="w-4 h-4 text-slate-500" strokeWidth={2.5} />, color: "bg-slate-500/20 border-slate-500 text-slate-700 dark:text-slate-300" },
+  { key: "hand",      label: "Mãos ao Alto",   icon: <Hand className="w-4 h-4 text-slate-500" strokeWidth={2.5} />, color: "bg-slate-500/20 border-slate-500 text-slate-700 dark:text-slate-300" },
 ];
 
 interface DetectionConfigModalProps {
@@ -32,9 +32,7 @@ function DetectionConfigModalComponent({
   const [isSaving, setIsSaving] = useState(false);
   const [streamKey] = useState(Date.now());
 
-  const mjpegBase = import.meta.env.DEV
-    ? "http://localhost:8000"
-    : window.location.origin;
+  const mjpegBase = "";
   const streamUrl = `${mjpegBase}/video_feed?plat=${encodeURIComponent(cameraId)}&t=${streamKey}`;
 
   useEffect(() => {

@@ -20,7 +20,7 @@ const DETECTION_SERIES = [
     { key: 'sonolencia', label: 'Sonolência',  color: '#f59e0b' },
     { key: 'celular',    label: 'Celular',     color: '#3b82f6' },
     { key: 'cigarro',    label: 'Cigarro',     color: '#ef4444' },
-    { key: 'arma',       label: 'Arma de Fogo',color: '#6b7280' },
+    { key: 'maos_ao_alto', label: 'Mãos ao Alto',color: '#6b7280' },
 ];
 
 function toDateOnly(d: Date): string {

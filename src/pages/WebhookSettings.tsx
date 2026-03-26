@@ -14,7 +14,7 @@ const EVENT_OPTIONS = [
   { key: 'sonolencia', label: 'Sonolência' },
   { key: 'celular',    label: 'Celular' },
   { key: 'cigarro',    label: 'Cigarro' },
-  { key: 'arma',       label: 'Arma de Fogo' },
+  { key: 'maos_ao_alto', label: 'Mãos ao Alto' },
 ];
 
 interface Webhook {

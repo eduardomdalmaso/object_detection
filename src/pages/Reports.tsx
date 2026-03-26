@@ -32,7 +32,7 @@ const OBJECT_LABELS: Record<string, string> = {
     sonolencia:'Sonolência',
     celular:   'Celular',
     cigarro:   'Cigarro',
-    arma:      'Arma de Fogo',
+    maos_ao_alto: 'Mãos ao Alto',
 };
 
 const OBJECT_COLORS: Record<string, string> = {
@@ -40,7 +40,7 @@ const OBJECT_COLORS: Record<string, string> = {
     sonolencia:'bg-amber-100 text-amber-800',
     celular:   'bg-blue-100 text-blue-800',
     cigarro:   'bg-red-100 text-red-800',
-    arma:      'bg-gray-100 text-gray-800',
+    maos_ao_alto: 'bg-gray-100 text-gray-800',
 };
 
 const Reports = () => {
