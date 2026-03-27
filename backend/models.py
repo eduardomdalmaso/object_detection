@@ -6,7 +6,8 @@ from zoneinfo import ZoneInfo
 def get_utc_minus_3():
     return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
 
-OBJECT_TYPES = ["emocoes", "sonolencia", "celular", "cigarro", "maos_ao_alto"]
+OBJECT_TYPES = ["emocoes", "sonolencia", "celular", "cigarro", "maos_ao_alto", "arma"]
+
 
 
 class User(Base):
@@ -40,6 +41,7 @@ class Detection(Base):
     camera_name = Column(String, nullable=False)
     object_type = Column(String, nullable=False, index=True)  # emocoes|sonolencia|celular|cigarro|maos_ao_alto
     confidence = Column(Float, default=0.0)
+    severity = Column(String, default="Normal")
     timestamp = Column(DateTime, default=get_utc_minus_3, index=True)
 
 
@@ -76,3 +78,4 @@ class GlobalSettings(Base):
     logo_url = Column(String, nullable=True)  # Base64 string
     brand_name = Column(String, default="Gases")
     brand_subtitle = Column(String, default="Distribuição")
+    severities = Column(JSON, default={})

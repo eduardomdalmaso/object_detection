@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils';
 import Cameras from './Cameras';
 import Users from './Users';
 import AuditLogs from './AuditLogs';
+import SeverityConfig from './SeverityConfig';
 import { hasPagePermission } from '@/lib/permissions';
 import { useAuthStore } from '@/store/useAuthStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
@@ -12,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 
 export default function Cadastros() {
     const { t } = useTranslation();
-    const [activeTab, setActiveTab] = useState<'cameras' | 'users' | 'settings' | 'audit'>('cameras');
+    const [activeTab, setActiveTab] = useState<'cameras' | 'severidade' | 'users' | 'settings' | 'audit'>('cameras');
     const user = useAuthStore((state) => state.user);
     const { whatsapp, phone, supportEmail, brandName, brandSubtitle, logoUrl, updateSettings } = useSettingsStore();
 
@@ -53,6 +54,20 @@ export default function Cadastros() {
                     >
                         <VideoIcon className="h-4 w-4" />
                         {t('cadastros.tabs.cameras')}
+                    </button>
+                )}
+                {user?.role === 'admin' && (
+                    <button
+                        onClick={() => setActiveTab('severidade')}
+                        className={cn(
+                            "flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors",
+                            activeTab === 'severidade'
+                                ? "border-blue-600 text-blue-600"
+                                : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                        )}
+                    >
+                        <Settings className="h-4 w-4" />
+                        Severidade
                     </button>
                 )}
                 {hasPagePermission(user, 'users') && (
@@ -103,6 +118,7 @@ export default function Cadastros() {
             {/* Tab Content */}
             <div className="mt-6">
                 {activeTab === 'cameras' && hasPagePermission(user, 'cameras') && <Cameras />}
+                {activeTab === 'severidade' && user?.role === 'admin' && <SeverityConfig />}
                 {activeTab === 'users' && hasPagePermission(user, 'users') && <Users />}
                 {activeTab === 'audit' && hasPagePermission(user, 'audit') && <AuditLogs />}
                 {activeTab === 'settings' && user?.role === 'admin' && (

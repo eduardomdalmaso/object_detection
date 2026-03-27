@@ -9,7 +9,9 @@ const DETECTION_MODES = [
   { key: "phone",     label: "Celular",        icon: "📱", color: "bg-blue-500/20 border-blue-500 text-blue-700 dark:text-blue-300" },
   { key: "cigarette", label: "Cigarro",        icon: "🚬", color: "bg-red-500/20 border-red-500 text-red-700 dark:text-red-300" },
   { key: "hand",      label: "Mãos ao Alto",   icon: <Hand className="w-4 h-4 text-slate-500" strokeWidth={2.5} />, color: "bg-slate-500/20 border-slate-500 text-slate-700 dark:text-slate-300" },
+  { key: "gun",       label: "Arma de Fogo",   icon: "🔫", color: "bg-cyan-500/20 border-cyan-500 text-cyan-700 dark:text-cyan-300" },
 ];
+
 
 interface DetectionConfigModalProps {
   isOpen: boolean;

@@ -8,7 +8,9 @@ import api from '@/lib/api';
 import { useCameraStore } from '@/store/useCameraStore';
 import { useTranslation } from 'react-i18next';
 import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import html2canvas from 'html2canvas';
+
+import ReportPDFTemplate from '@/components/reports/ReportPDFTemplate';
 
 interface IntegrationLog {
     id: string;
@@ -24,23 +26,47 @@ interface DetectionItem {
     camera_id: string;
     camera_name: string;
     object_type: string;
+    severity?: string;
     confidence: number;
 }
 
 const OBJECT_LABELS: Record<string, string> = {
-    emocoes:   'Emoções',
+    arma:      'Arma de Fogo',
+    emocoes:   'Emoções (Legado)',
     sonolencia:'Sonolência',
     celular:   'Celular',
     cigarro:   'Cigarro',
     maos_ao_alto: 'Mãos ao Alto',
+    feliz:     'Feliz',
+    triste:    'Triste',
+    medo:      'Medo',
+    neutro:    'Normal (Neutro)',
+    raiva:     'Raiva',
+    surpresa:  'Surpresa',
+    nojo:      'Nojo',
 };
 
 const OBJECT_COLORS: Record<string, string> = {
+    arma:      'bg-cyan-100 text-cyan-900',
     emocoes:   'bg-violet-100 text-violet-800',
     sonolencia:'bg-amber-100 text-amber-800',
     celular:   'bg-blue-100 text-blue-800',
     cigarro:   'bg-red-100 text-red-800',
     maos_ao_alto: 'bg-gray-100 text-gray-800',
+    feliz:     'bg-green-100 text-green-800',
+    triste:    'bg-blue-100 text-blue-800',
+    medo:      'bg-purple-100 text-purple-800',
+    neutro:    'bg-gray-100 text-gray-800',
+    raiva:     'bg-red-100 text-red-800',
+    surpresa:  'bg-yellow-100 text-yellow-800',
+    nojo:      'bg-orange-100 text-orange-800',
+};
+
+const SEVERITY_COLORS: Record<string, string> = {
+    'Baixo': 'text-green-600 bg-green-50 border-green-200',
+    'Normal': 'text-blue-600 bg-blue-50 border-blue-200',
+    'Alto': 'text-orange-600 bg-orange-50 border-orange-200',
+    'Crítico': 'text-red-600 bg-red-50 border-red-200',
 };
 
 const Reports = () => {
@@ -50,6 +76,7 @@ const Reports = () => {
     const cameras = useCameraStore((state: any) => state.cameras);
     const [cameraFilter, setCameraFilter] = useState('all');
     const [objectFilter, setObjectFilter] = useState('all');
+    const [severityFilter, setSeverityFilter] = useState('all');
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
     const [includeTime, setIncludeTime] = useState(false);
@@ -71,6 +98,7 @@ const Reports = () => {
             if (endDate) params.end = endDate;
             if (cameraFilter !== 'all') params.camera = cameraFilter;
             if (objectFilter !== 'all') params.object = objectFilter;
+            if (severityFilter !== 'all') params.severity = severityFilter;
 
             const [reportsRes, logsRes] = await Promise.all([
                 api.get('/api/v1/reports', { params }),
@@ -88,8 +116,8 @@ const Reports = () => {
     };
 
     useEffect(() => { fetchData(); }, []);
-    useEffect(() => { fetchData(); }, [cameraFilter, objectFilter, startDate, endDate]);
-    useEffect(() => { setCurrentPage(1); }, [cameraFilter, objectFilter, startDate, endDate]);
+    useEffect(() => { fetchData(); }, [cameraFilter, objectFilter, severityFilter, startDate, endDate]);
+    useEffect(() => { setCurrentPage(1); }, [cameraFilter, objectFilter, severityFilter, startDate, endDate]);
 
     const handleSort = (key: string) => {
         if (sortKey === key) {
@@ -132,11 +160,12 @@ const Reports = () => {
             const today = new Date().toISOString().slice(0, 10);
 
             if (format === 'CSV') {
-                const header = ['Data/Hora', 'Câmera', 'Objeto Detectado', 'Confiança (%)'];
+                const header = ['Data/Hora', 'Câmera', 'Objeto Detectado', 'Severidade', 'Confiança (%)'];
                 const rows = sortedData.map((item: any) => [
                     item.timestamp || '',
                     item.camera_name || item.camera_id || '',
                     OBJECT_LABELS[item.object_type] || item.object_type || '',
+                    item.severity || 'Normal',
                     String(item.confidence ?? 0),
                 ]);
                 const csvContent = [header, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
@@ -150,63 +179,30 @@ const Reports = () => {
                 link.remove();
                 URL.revokeObjectURL(url);
             } else {
-                // PDF via jsPDF + autoTable
-                const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-
-                // Title
-                doc.setFontSize(18);
-                doc.setFont('helvetica', 'bold');
-                doc.text('Relatorio de Deteccoes', 14, 20);
-
-                // Subtitle
-                doc.setFontSize(10);
-                doc.setFont('helvetica', 'normal');
-                doc.setTextColor(100);
-                doc.text('Object Detection System', 14, 27);
-
-                // Metadata
-                doc.setFontSize(9);
-                doc.setTextColor(60);
-                const camLabel = cameraFilter === 'all' ? 'Todas as cameras' : cameraFilter;
-                const objLabel = objectFilter === 'all' ? 'Todos os objetos' : (OBJECT_LABELS[objectFilter] || objectFilter);
-                doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, 14, 35);
-                doc.text(`Camera: ${camLabel}  |  Objeto: ${objLabel}  |  Total: ${sortedData.length} registro(s)`, 14, 40);
-                if (startDate || endDate) {
-                    doc.text(`Periodo: ${startDate || '—'} ate ${endDate || '—'}`, 14, 45);
+                // PDF via html2canvas (Insights and Charts Render)
+                const element = document.getElementById('pdf-report-container');
+                if (!element) {
+                    throw new Error("Template container not found");
                 }
+                
+                // Allow CSS transition flush
+                await new Promise(r => setTimeout(r, 600));
 
-                // Table
-                const tableData = sortedData.map((item: any) => [
-                    item.timestamp || '—',
-                    item.camera_name || item.camera_id || '—',
-                    OBJECT_LABELS[item.object_type] || item.object_type || '—',
-                    `${item.confidence ?? 0}%`,
-                ]);
-
-                autoTable(doc, {
-                    startY: startDate || endDate ? 50 : 45,
-                    head: [['Data/Hora', 'Camera', 'Objeto Detectado', 'Confianca (%)']],
-                    body: tableData,
-                    styles: { fontSize: 8, cellPadding: 2 },
-                    headStyles: { fillColor: [41, 128, 185], textColor: 255, fontStyle: 'bold' },
-                    alternateRowStyles: { fillColor: [245, 245, 245] },
-                    margin: { left: 14, right: 14 },
+                const canvas = await html2canvas(element, { 
+                    scale: 2, 
+                    useCORS: true, 
+                    backgroundColor: '#0f172a' // slate-900 
                 });
-
-                // Footer
-                const pageCount = doc.getNumberOfPages();
-                for (let i = 1; i <= pageCount; i++) {
-                    doc.setPage(i);
-                    doc.setFontSize(7);
-                    doc.setTextColor(150);
-                    doc.text(
-                        `Pagina ${i} de ${pageCount} — Gerado automaticamente pelo Object Detection System`,
-                        14,
-                        doc.internal.pageSize.height - 8,
-                    );
-                }
-
-                doc.save(`relatorio_deteccoes_${today}.pdf`);
+                const imgData = canvas.toDataURL('image/png');
+                
+                // create PDF A4 size
+                const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+                
+                const pdfWidth = pdf.internal.pageSize.getWidth();
+                const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+                
+                pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+                pdf.save(`insights_operacionais_${today}.pdf`);
             }
         } catch (error: any) {
             alert(`Nao foi possivel gerar o ${format}. Tente novamente.`);
@@ -228,6 +224,20 @@ const Reports = () => {
             <div className="flex flex-col gap-2">
                 <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">{t('reports.title')}</h1>
                 <p className="text-slate-500">{t('reports.subtitle')}</p>
+            </div>
+
+            {/* Invisible layout template for PDF Rendering Insights */}
+            <div className="absolute left-[-9999px] top-[-9999px] z-[-9999]">
+                <ReportPDFTemplate 
+                    data={sortedData} 
+                    filters={{
+                        camera: cameraFilter,
+                        object: objectFilter,
+                        severity: severityFilter,
+                        startDate,
+                        endDate
+                    }}
+                />
             </div>
 
             {/* Tab Switcher */}
@@ -261,14 +271,14 @@ const Reports = () => {
                                         checked={includeTime} onChange={(e) => setIncludeTime(e.target.checked)} />
                                     <span>Incluir hora</span>
                                 </label>
-                                <button onClick={() => { setCameraFilter('all'); setObjectFilter('all'); setStartDate(''); setEndDate(''); setCurrentPage(1); }}
+                                <button onClick={() => { setCameraFilter('all'); setObjectFilter('all'); setSeverityFilter('all'); setStartDate(''); setEndDate(''); setCurrentPage(1); }}
                                     className="px-3 py-1 text-xs font-medium rounded-lg border border-border bg-secondary text-muted-foreground hover:bg-accent transition-colors">
                                     Resetar filtros
                                 </button>
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4">
                             {/* Câmera */}
                             <div>
                                 <label className="block text-sm font-medium text-muted-foreground mb-1">Câmera</label>
@@ -287,9 +297,23 @@ const Reports = () => {
                                 <select className="w-full rounded-lg bg-background border-border border px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500"
                                     value={objectFilter} onChange={(e) => setObjectFilter(e.target.value)}>
                                     <option value="all">Todos os objetos</option>
-                                    {Object.entries(OBJECT_LABELS).map(([key, label]) => (
-                                        <option key={key} value={key}>{label}</option>
-                                    ))}
+                                    {Object.entries(OBJECT_LABELS).map(([key, label]) => {
+                                        if (key === 'emocoes' || key === 'emotion') return null; // Hide the legacy generic one
+                                        return <option key={key} value={key}>{label}</option>
+                                    })}
+                                </select>
+                            </div>
+
+                            {/* Severidade */}
+                            <div>
+                                <label className="block text-sm font-medium text-muted-foreground mb-1">Severidade</label>
+                                <select className="w-full rounded-lg bg-background border-border border px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    value={severityFilter} onChange={(e) => setSeverityFilter(e.target.value)}>
+                                    <option value="all">Todas</option>
+                                    <option value="Baixo">Baixo</option>
+                                    <option value="Normal">Normal</option>
+                                    <option value="Alto">Alto</option>
+                                    <option value="Crítico">Crítico</option>
                                 </select>
                             </div>
 
@@ -338,6 +362,7 @@ const Reports = () => {
                                         <SortTh label="Data/Hora"        sortId="timestamp"   />
                                         <SortTh label="Câmera"           sortId="camera_name" />
                                         <SortTh label="Objeto detectado" sortId="object_type" />
+                                        <SortTh label="Severidade"       sortId="severity"    />
                                         <SortTh label="Confiança (%)"    sortId="confidence"  />
                                     </tr>
                                 </thead>
@@ -354,6 +379,8 @@ const Reports = () => {
                                             const key = item.id ?? `row-${idx}`;
                                             const objColor = OBJECT_COLORS[item.object_type] || 'bg-gray-100 text-gray-800';
                                             const objLabel = OBJECT_LABELS[item.object_type] || item.object_type;
+                                            const sevLevel = item.severity || 'Normal';
+                                            const sevColor = SEVERITY_COLORS[sevLevel] || 'text-gray-600 bg-gray-50 border-gray-200';
                                             return (
                                                 <tr key={key} className="hover:bg-secondary/30 transition-colors">
                                                     <td className="px-4 py-4 text-sm text-foreground font-medium">{item.timestamp || '-'}</td>
@@ -361,6 +388,11 @@ const Reports = () => {
                                                     <td className="px-4 py-4 text-sm">
                                                         <span className={cn("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium", objColor)}>
                                                             {objLabel}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-4 text-sm">
+                                                        <span className={cn("inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold border", sevColor)}>
+                                                            {sevLevel}
                                                         </span>
                                                     </td>
                                                     <td className="px-4 py-4 text-sm text-foreground font-bold">{item.confidence ?? 0}%</td>

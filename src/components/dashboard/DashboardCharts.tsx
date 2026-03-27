@@ -16,11 +16,12 @@ interface DashboardChartsProps {
 }
 
 const DETECTION_SERIES = [
-    { key: 'emocoes',    label: 'Emoções',     color: '#8b5cf6' },
-    { key: 'sonolencia', label: 'Sonolência',  color: '#f59e0b' },
-    { key: 'celular',    label: 'Celular',     color: '#3b82f6' },
-    { key: 'cigarro',    label: 'Cigarro',     color: '#ef4444' },
-    { key: 'maos_ao_alto', label: 'Mãos ao Alto',color: '#6b7280' },
+    { key: 'emocoes',    label: 'Emoções',       color: '#8b5cf6' },
+    { key: 'sonolencia', label: 'Sonolência',    color: '#f59e0b' },
+    { key: 'celular',    label: 'Celular',       color: '#3b82f6' },
+    { key: 'cigarro',    label: 'Cigarro',       color: '#ef4444' },
+    { key: 'maos_ao_alto', label: 'Mãos ao Alto', color: '#6b7280' },
+    { key: 'arma',       label: 'Arma de Fogo',  color: '#06b6d4' },
 ];
 
 function toDateOnly(d: Date): string {
@@ -64,6 +65,15 @@ function DashboardChartsComponent({ timeFilter, cameraFilter, timeRange }: Dashb
     useEffect(() => {
         fetchChartData();
     }, [chartPeriod, cameraFilter, timeFilter, timeRange?.start, timeRange?.end]);
+
+    // Auto-refresh every 30s when in live mode
+    useEffect(() => {
+        if (timeFilter !== 'live') return;
+        const interval = setInterval(() => {
+            fetchChartData();
+        }, 30_000);
+        return () => clearInterval(interval);
+    }, [timeFilter, cameraFilter, chartPeriod]);
 
     const cameraLabel = cameraFilter === 'all' ? 'Todas as câmeras' : `Câmera ${cameraFilter}`;
     const chartData = useMemo(() => data || [], [data]);

@@ -69,6 +69,7 @@ MODELS_DIR = os.path.dirname(os.path.abspath(__file__))
 face_detector = YOLO(os.path.join(MODELS_DIR, 'face-lindevs.pt'))
 phone_detector = YOLO(os.path.join(MODELS_DIR, 'cellphone.pt'))
 cigarette_detector = YOLO(os.path.join(MODELS_DIR, 'cigarette.pt'))
+gun_detector = YOLO(os.path.join(MODELS_DIR, 'gun.pt'))
 landmark_predictor = dlib.shape_predictor(os.path.join(MODELS_DIR, 'face_landmarks.dat'))
 
 # ========================== MEDIAPIPE POSE ==========================
@@ -170,6 +171,18 @@ MODE_TO_OBJECT_TYPE = {
     "phone": "celular",
     "hand": "maos_ao_alto",   # hand raised detection
     "cigarette": "cigarro",
+    "gun": "arma",
+}
+
+# Translate english emotions inside DB
+EMOTION_TRANSLATION_MAP = {
+    "happy": "feliz",
+    "sad": "triste",
+    "fear": "medo",
+    "neutral": "neutro",
+    "angry": "raiva",
+    "surprise": "surpresa",
+    "disgust": "nojo"
 }
 
 
@@ -203,6 +216,7 @@ class CameraPipeline:
         self.phone_stats = {"phone": 0.0, "no_phone": 0.0}
         self.hand_stats = {"up": 0.0, "down": 0.0}
         self.cigarette_stats = {"cigarette": 0.0, "no_cigarette": 0.0}
+        self.gun_stats = {"gun": 0.0, "no_gun": 0.0}
         self.stats_frame_count = 0
 
         # MediaPipe pose (lazy-loaded to avoid crash if libGLESv2 is missing)
@@ -321,6 +335,7 @@ class CameraPipeline:
         phone_detected = False
         hand_up = False
         cigarette_detected = False
+        gun_detected = False
         detection_confidence = 0.0
         dominant_emotion = None
 
@@ -443,6 +458,21 @@ class CameraPipeline:
             except Exception:
                 pass
 
+        # ── Gun (Arma de Fogo) ────────────────────────────────────
+        if mode == "gun":
+            try:
+                gun_results = gun_detector(frame, conf=0.45, verbose=False)
+                for result in gun_results:
+                    for box in result.boxes:
+                        gun_detected = True
+                        detection_confidence = max(detection_confidence, float(box.conf[0]))
+                        gx1, gy1, gx2, gy2 = map(int, box.xyxy[0])
+                        cv2.rectangle(annotated, (gx1, gy1), (gx2, gy2), (0, 255, 255), 4)
+                        cv2.putText(annotated, "ARMA DETECTADA", (gx1, gy1 - 15),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 3)
+            except Exception:
+                pass
+
         # ── Stats update ──────────────────────────────────────────
         with self.stats_lock:
             self.stats_frame_count += 1
@@ -454,9 +484,11 @@ class CameraPipeline:
                 self.hand_stats["up" if hand_up else "down"] += 1
             elif mode == "cigarette":
                 self.cigarette_stats["cigarette" if cigarette_detected else "no_cigarette"] += 1
+            elif mode == "gun":
+                self.gun_stats["gun" if gun_detected else "no_gun"] += 1
 
         # ── Auto-save detection to DB (throttled) ─────────────────
-        detected_something = drowsy_this_frame or phone_detected or hand_up or cigarette_detected
+        detected_something = drowsy_this_frame or phone_detected or hand_up or cigarette_detected or gun_detected
         # For emotion mode, consider it a detection if confidence > 0.5
         if mode == "emotion" and detection_confidence > 0.5:
             detected_something = True
@@ -471,18 +503,26 @@ class CameraPipeline:
     def _save_detection(self, confidence: float, dominant_emotion: str = None):
         """Save a detection event to the database and dispatch webhooks."""
         try:
+            from models import GlobalSettings
             db = SessionLocal()
             # For emotion mode, save the specific emotion type instead of generic "emocoes"
             if self.detection_mode == "emotion" and dominant_emotion:
-                object_type = dominant_emotion
+                object_type = EMOTION_TRANSLATION_MAP.get(dominant_emotion.lower(), dominant_emotion.lower())
             else:
                 object_type = MODE_TO_OBJECT_TYPE.get(self.detection_mode, "emocoes")
+            
+            settings = db.query(GlobalSettings).first()
+            severity = "Normal"
+            if settings and settings.severities:
+                severity = settings.severities.get(object_type, "Normal")
+
             now = get_utc_minus_3()
             d = Detection(
                 camera_id=self.camera_id,
                 camera_name=self.camera_name,
                 object_type=object_type,
                 confidence=min(confidence, 1.0),
+                severity=severity,
                 timestamp=now
             )
             db.add(d)
@@ -497,6 +537,7 @@ class CameraPipeline:
                 "camera_name": self.camera_name,
                 "object_type": object_type,
                 "confidence": round(min(confidence, 1.0), 4),
+                "severity": severity,
             }
             threading.Thread(target=dispatch_webhooks, args=(event_data,), daemon=True).start()
         except Exception as e:
@@ -560,6 +601,12 @@ class CameraPipeline:
                     "cigarette": round(self.cigarette_stats["cigarette"] / total * 100, 1) if total > 0 else 0,
                     "no_cigarette": round(self.cigarette_stats["no_cigarette"] / total * 100, 1) if total > 0 else 0
                 }
+            elif mode == "gun":
+                total = self.gun_stats["gun"] + self.gun_stats["no_gun"]
+                return {
+                    "gun": round(self.gun_stats["gun"] / total * 100, 1) if total > 0 else 0,
+                    "no_gun": round(self.gun_stats["no_gun"] / total * 100, 1) if total > 0 else 0
+                }
             return {}
 
     def reset_stats(self):
@@ -571,6 +618,7 @@ class CameraPipeline:
             self.phone_stats = {"phone": 0.0, "no_phone": 0.0}
             self.hand_stats = {"up": 0.0, "down": 0.0}
             self.cigarette_stats = {"cigarette": 0.0, "no_cigarette": 0.0}
+            self.gun_stats = {"gun": 0.0, "no_gun": 0.0}
             self.stats_frame_count = 0
 
 
@@ -988,7 +1036,7 @@ class SetModesRequest(BaseModel):
 @app.post("/api/v1/set_modes")
 async def set_modes(body: SetModesRequest, db: Session = Depends(get_db)):
     """Set the active detection modes for a specific camera (multi-select)."""
-    valid_modes = ['emotion', 'sleeping', 'phone', 'hand', 'cigarette']
+    valid_modes = ['emotion', 'sleeping', 'phone', 'hand', 'cigarette', 'gun']
     for m in body.modes:
         if m not in valid_modes:
             raise HTTPException(status_code=400, detail=f"Invalid mode '{m}'. Valid: {valid_modes}")
@@ -1019,7 +1067,7 @@ class SetModeRequest(BaseModel):
 @app.post("/api/v1/set_mode")
 async def set_mode(body: SetModeRequest, db: Session = Depends(get_db)):
     """Legacy: set a single detection mode."""
-    valid_modes = ['emotion', 'sleeping', 'phone', 'hand', 'cigarette']
+    valid_modes = ['emotion', 'sleeping', 'phone', 'hand', 'cigarette', 'gun']
     if body.mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Valid: {valid_modes}")
 
@@ -1052,6 +1100,7 @@ async def get_reports(
     request: Request,
     camera: str = Query("all"),
     object: str = Query("all"),
+    severity: str = Query("all"),
     start: str = Query(None),
     end: str = Query(None),
     db: Session = Depends(get_db)
@@ -1065,6 +1114,8 @@ async def get_reports(
         q = q.filter(Detection.camera_id == camera)
     if object != "all":
         q = q.filter(Detection.object_type == object)
+    if severity != "all":
+        q = q.filter(Detection.severity == severity)
     if start:
         try:
             q = q.filter(Detection.timestamp >= datetime.fromisoformat(start))
@@ -1087,6 +1138,7 @@ async def get_reports(
             "camera_id": d.camera_id,
             "camera_name": d.camera_name,
             "object_type": d.object_type,
+            "severity": d.severity,
             "confidence": round(d.confidence * 100, 1),
         }
         for d in detections
@@ -1114,6 +1166,7 @@ def _query_detections_for_export(body: dict, db: Session):
     """Shared query logic for CSV/PDF export endpoints."""
     camera = body.get("camera", "all")
     obj = body.get("object", "all")
+    severity = body.get("severity", "all")
     start = body.get("startDate")
     end = body.get("endDate")
 
@@ -1122,6 +1175,8 @@ def _query_detections_for_export(body: dict, db: Session):
         q = q.filter(Detection.camera_id == camera)
     if obj and obj != "all":
         q = q.filter(Detection.object_type == obj)
+    if severity and severity != "all":
+        q = q.filter(Detection.severity == severity)
     if start:
         try:
             q = q.filter(Detection.timestamp >= datetime.fromisoformat(start))
@@ -1130,13 +1185,48 @@ def _query_detections_for_export(body: dict, db: Session):
     if end:
         try:
             end_dt = datetime.fromisoformat(end)
-            if "T" not in str(end):
+            if "T" not in end:
                 end_dt = end_dt.replace(hour=23, minute=59, second=59)
             q = q.filter(Detection.timestamp <= end_dt)
         except ValueError:
             pass
-
     return q.order_by(Detection.timestamp.desc()).limit(2000).all()
+
+# ── Severities ────────────────────────────────────────────────────────
+
+@app.get("/api/v1/severities")
+async def get_severities(request: Request, db: Session = Depends(get_db)):
+    from models import GlobalSettings
+    settings = db.query(GlobalSettings).first()
+    if not settings:
+        settings = GlobalSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return {"severities": settings.severities or {}}
+
+@app.post("/api/v1/severities")
+async def update_severities(request: Request, db: Session = Depends(get_db)):
+    from models import GlobalSettings
+    current_user = _get_session_user(request, db)
+    if not current_user or current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    body = await request.json()
+    settings = db.query(GlobalSettings).first()
+    if not settings:
+        settings = GlobalSettings()
+        db.add(settings)
+        
+    # merge current settings with body
+    current_severities = dict(settings.severities or {})
+    for k, v in body.items():
+        current_severities[k] = v
+        
+    settings.severities = current_severities
+    db.commit()
+    return {"message": "Severidades atualizadas", "severities": settings.severities}
+
 
 
 # ── CSV Export ───────────────────────────────────────────────────
@@ -1282,14 +1372,25 @@ async def get_charts(
 
     detections = q.all()
 
+    # Subtypes of emocoes that should be grouped under the 'emocoes' bucket
+    # Includes both portuguese (current) and english (legacy) labels
+    EMOTION_SUBTYPES = {
+        "feliz", "triste", "medo", "neutro", "raiva", "surpresa", "nojo",
+        "happy", "sad", "fear", "neutral", "angry", "surprise", "disgust"
+    }
+
     buckets: dict[str, dict] = {}
     for d in detections:
         label = _build_chart_bucket(period, d.timestamp)
         if label not in buckets:
             buckets[label] = {"time": label, "emocoes": 0, "sonolencia": 0,
-                               "celular": 0, "cigarro": 0, "maos_ao_alto": 0}
-        if d.object_type in buckets[label]:
-            buckets[label][d.object_type] += 1
+                               "celular": 0, "cigarro": 0, "maos_ao_alto": 0, "arma": 0}
+        # Normalise emotion subtypes back to the single 'emocoes' bucket
+        obj = d.object_type
+        if obj in EMOTION_SUBTYPES:
+            obj = "emocoes"
+        if obj in buckets[label]:
+            buckets[label][obj] += 1
 
     sorted_data = sorted(buckets.values(), key=lambda x: x["time"])
     return {"data": sorted_data}

@@ -47,9 +47,15 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
             for (const item of data) {
                 if (item.object_type === 'celular') distractions++;
                 else if (item.object_type === 'sonolencia') drowsiness++;
-                else if (item.object_type === 'cigarro' || item.object_type === 'maos_ao_alto') criticals++;
-                else if (['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral'].includes(item.object_type)) {
-                    emotionCounts[item.object_type] = (emotionCounts[item.object_type] || 0) + 1;
+                else if (item.object_type === 'cigarro' || item.object_type === 'maos_ao_alto' || item.object_type === 'arma') criticals++;
+                else if (['feliz', 'triste', 'medo', 'neutro', 'raiva', 'surpresa', 'nojo',
+                          'happy', 'sad', 'fear', 'neutral', 'angry', 'surprise', 'disgust'].includes(item.object_type)) {
+                    const ptMap: Record<string, string> = {
+                        happy: 'feliz', sad: 'triste', fear: 'medo',
+                        neutral: 'neutro', angry: 'raiva', surprise: 'surpresa', disgust: 'nojo'
+                    };
+                    const key = ptMap[item.object_type] || item.object_type;
+                    emotionCounts[key] = (emotionCounts[key] || 0) + 1;
                     totalEmotions++;
                 }
             }
@@ -89,6 +95,13 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
 
     useEffect(() => { fetchStats(); }, [cameraFilter, timeFilter, timeRangeKey]);
 
+    // Auto-refresh every 30s when in live mode
+    useEffect(() => {
+        if (timeFilter !== 'live') return;
+        const interval = setInterval(() => { fetchStats(); }, 30_000);
+        return () => clearInterval(interval);
+    }, [timeFilter, cameraFilter]);
+
     const riskColor = stats.riskLevel === 'Alto' ? 'text-red-500' : stats.riskLevel === 'Médio' ? 'text-yellow-500' : 'text-green-500';
 
     return (
@@ -100,7 +113,7 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
                 <div className="rounded-xl bg-card p-4 shadow-sm border border-border flex flex-col justify-between min-h-[100px]">
                     <div className="flex items-center gap-2 mb-2">
                         <Smile className="h-5 w-5 text-purple-500" />
-                        <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Emoções</span>
+                        <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Medidor de Humor</span>
                     </div>
                     <div className="flex flex-wrap gap-x-3 gap-y-1">
                         {isLoading ? (
@@ -110,11 +123,15 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
                                 .sort(([,a], [,b]) => b - a)
                                 .map(([emotion, pct]) => {
                                     const emojiMap: Record<string, string> = {
-                                        angry: '😡', disgust: '🤢', fear: '😨',
-                                        happy: '😄', sad: '😢', surprise: '😲', neutral: '😐'
+                                        raiva: '😡', nojo: '🤢', medo: '😨',
+                                        feliz: '😄', triste: '😢', surpresa: '😲', neutro: '😐'
+                                    };
+                                    const labelMap: Record<string, string> = {
+                                        feliz: 'Feliz', triste: 'Triste', medo: 'Medo',
+                                        neutro: 'Neutro', raiva: 'Raiva', surpresa: 'Surpresa', nojo: 'Nojo'
                                     };
                                     return (
-                                        <div key={emotion} className="flex items-center gap-1 text-base font-bold text-foreground" title={emotion}>
+                                        <div key={emotion} className="flex items-center gap-1 text-base font-bold text-foreground" title={labelMap[emotion] || emotion}>
                                             <span>{emojiMap[emotion] || '🤔'}</span>
                                             <span>{pct}%</span>
                                         </div>
