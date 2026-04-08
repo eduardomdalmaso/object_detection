@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'obdet-backend',
       script: '/home/administrator/miniconda3/envs/detection/bin/python',
-      args: '-m uvicorn main:app --host 0.0.0.0 --port 8005',
+      args: '-m uvicorn main:app --host 0.0.0.0 --port 8005 --workers 4',
       cwd: '/home/administrator/object_detection/backend',
       autorestart: true,
       watch: false,

@@ -2,6 +2,7 @@ import { useState, useEffect, memo } from 'react';
 import { Smartphone, Smile, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import api from '@/lib/api';
+import { HighRiskModal } from './HighRiskModal';
 
 interface KPICardsProps {
     realtimeData?: any;
@@ -18,9 +19,11 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
         attentionScore: 100,
         riskLevel: 'Baixo' as 'Baixo' | 'Médio' | 'Alto',
         totalEvents: 0,
-        emotions: {} as Record<string, number>
+        emotions: {} as Record<string, number>,
+        unackRiskEvents: [] as any[]
     });
     const [isLoading, setIsLoading] = useState(true);
+    const [isRiskModalOpen, setIsRiskModalOpen] = useState(false);
 
     const timeRangeKey = JSON.stringify(timeRange || {});
 
@@ -43,11 +46,16 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
             let criticals = 0;
             let emotionCounts: Record<string, number> = {};
             let totalEmotions = 0;
+            let unackCriticals = 0;
+            let unackDrowsiness = 0;
+            let unackRiskEvents: any[] = [];
 
             for (const item of data) {
+                const isCriticalType = item.object_type === 'cigarro' || item.object_type === 'maos_ao_alto' || item.object_type === 'arma';
+                
                 if (item.object_type === 'celular') distractions++;
                 else if (item.object_type === 'sonolencia') drowsiness++;
-                else if (item.object_type === 'cigarro' || item.object_type === 'maos_ao_alto' || item.object_type === 'arma') criticals++;
+                else if (isCriticalType) criticals++;
                 else if (['feliz', 'triste', 'medo', 'neutro', 'raiva', 'surpresa', 'nojo',
                           'happy', 'sad', 'fear', 'neutral', 'angry', 'surprise', 'disgust'].includes(item.object_type)) {
                     const ptMap: Record<string, string> = {
@@ -57,6 +65,14 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
                     const key = ptMap[item.object_type] || item.object_type;
                     emotionCounts[key] = (emotionCounts[key] || 0) + 1;
                     totalEmotions++;
+                }
+
+                if (item.acknowledged !== true) {
+                    if (isCriticalType) unackCriticals++;
+                    if (item.object_type === 'sonolencia' && item.severity !== 'Normal') unackDrowsiness++;
+                    if (isCriticalType || (item.object_type === 'sonolencia' && item.severity !== 'Normal')) {
+                        unackRiskEvents.push(item);
+                    }
                 }
             }
 
@@ -74,17 +90,27 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
 
             // Risk Logic
             let risk: 'Baixo' | 'Médio' | 'Alto' = 'Baixo';
-            if (criticals > 0 || drowsiness >= 3) risk = 'Alto';
-            else if (drowsiness > 0 || distractions >= 5) risk = 'Médio';
+            if (unackCriticals > 0 || unackDrowsiness >= 3) risk = 'Alto';
+            else if (unackDrowsiness > 0 || distractions >= 5) risk = 'Médio';
 
-            setStats({
-                distractions,
-                drowsiness,
-                criticals,
-                attentionScore: attention,
-                riskLevel: risk,
-                totalEvents: data.length,
-                emotions: emotionPercentages
+            setStats(prev => {
+                if (prev.riskLevel !== 'Alto' && risk === 'Alto' && unackRiskEvents.length > prev.unackRiskEvents.length) {
+                    try {
+                        const audio = new Audio("https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3");
+                        audio.volume = 0.5;
+                        audio.play().catch(() => {});
+                    } catch (e) {}
+                }
+                return {
+                    distractions,
+                    drowsiness,
+                    criticals,
+                    attentionScore: attention,
+                    riskLevel: risk,
+                    totalEvents: data.length,
+                    emotions: emotionPercentages,
+                    unackRiskEvents
+                };
             });
         } catch (err) {
             console.error('KPI fetch failed:', err);
@@ -187,15 +213,24 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
                 </div>
 
                 {/* Risco */}
-                <div className="rounded-xl bg-card p-4 shadow-sm border border-border flex flex-col justify-between">
+                <div 
+                    onClick={() => { if (stats.riskLevel === 'Alto') setIsRiskModalOpen(true); }}
+                    className={cn(
+                        "rounded-xl bg-card p-4 shadow-sm border border-border flex flex-col justify-between transition-all duration-300",
+                        stats.riskLevel === 'Alto' && "border-red-500/50 cursor-pointer hover:bg-red-500/5 shadow-[0_0_15px_rgba(239,68,68,0.1)] hover:shadow-[0_0_20px_rgba(239,68,68,0.2)]"
+                    )}
+                >
                     <div className="flex items-center gap-2 mb-2">
-                        <ShieldAlert className={cn("h-5 w-5", riskColor)} />
+                        <ShieldAlert className={cn("h-5 w-5", riskColor, stats.riskLevel === 'Alto' && "animate-pulse")} />
                         <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Risco</span>
                     </div>
                     <div className="flex items-end gap-3">
                         <span className={cn("text-3xl font-bold", riskColor)}>{isLoading ? '...' : stats.riskLevel}</span>
                         {!isLoading && stats.riskLevel === 'Baixo' && (
                             <span className="text-xs font-semibold px-2 py-1 rounded-md bg-secondary text-green-600">OK</span>
+                        )}
+                        {!isLoading && stats.riskLevel === 'Alto' && (
+                            <span className="text-xs font-semibold px-2 py-1 rounded-md bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400">Verificar</span>
                         )}
                     </div>
                 </div>
@@ -240,6 +275,17 @@ function KPICardsComponent({ cameraFilter, timeFilter, timeRange }: KPICardsProp
                     </div>
                 </div>
             </div>
+
+            {isRiskModalOpen && (
+                <HighRiskModal 
+                    events={stats.unackRiskEvents} 
+                    onClose={() => setIsRiskModalOpen(false)} 
+                    onReset={() => {
+                        setIsRiskModalOpen(false);
+                        fetchStats();
+                    }} 
+                />
+            )}
         </div>
     );
 }

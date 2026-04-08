@@ -522,11 +522,11 @@ class CameraPipeline:
         now = time.time()
         if detected_something and (now - self.last_detection_time) >= self.detection_cooldown:
             self.last_detection_time = now
-            self._save_detection(detection_confidence, dominant_emotion=dominant_emotion)
+            self._save_detection(detection_confidence, dominant_emotion=dominant_emotion, annotated_frame=annotated)
 
         return annotated
 
-    def _save_detection(self, confidence: float, dominant_emotion: str = None):
+    def _save_detection(self, confidence: float, dominant_emotion: str = None, annotated_frame=None):
         """Save a detection event to the database and dispatch webhooks."""
         try:
             from models import GlobalSettings
@@ -555,6 +555,19 @@ class CameraPipeline:
             db.commit()
             db.close()
 
+            # Create base64 thumbnail if available
+            thumbnail_base64 = None
+            if annotated_frame is not None:
+                try:
+                    resized = cv2.resize(annotated_frame, (640, 360))
+                    # Encode to JPEG with 70% quality
+                    _, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                    thumbnail_base64 = base64.b64encode(buffer).decode('utf-8')
+                    # format data URI scheme
+                    thumbnail_base64 = f"data:image/jpeg;base64,{thumbnail_base64}"
+                except Exception as ex:
+                    print(f"⚠️ Failed to encode thumbnail base64: {ex}")
+
             # Dispatch webhooks in background
             event_data = {
                 "event": "detection",
@@ -564,6 +577,7 @@ class CameraPipeline:
                 "object_type": object_type,
                 "confidence": round(min(confidence, 1.0), 4),
                 "severity": severity,
+                "thumbnail_base64": thumbnail_base64,
             }
             threading.Thread(target=dispatch_webhooks, args=(event_data,), daemon=True).start()
         except Exception as e:
@@ -1128,6 +1142,7 @@ async def get_reports(
             "object_type": d.object_type,
             "severity": d.severity,
             "confidence": round(d.confidence * 100, 1),
+            "acknowledged": bool(d.acknowledged),
         }
         for d in detections
     ]
@@ -1179,6 +1194,22 @@ def _query_detections_for_export(body: dict, db: Session):
         except ValueError:
             pass
     return q.order_by(Detection.timestamp.desc()).limit(2000).all()
+
+# ── Detections Acknowledge ──────────────────────────────────────────────
+
+@app.post("/api/v1/detections/acknowledge")
+async def acknowledge_detections(request: Request, db: Session = Depends(get_db)):
+    """Acknowledge (dismiss) high risk detections from the dashboard."""
+    current_user = _get_session_user(request, db)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    body = await request.json()
+    ids = body.get("ids", [])
+    if ids:
+        db.query(Detection).filter(Detection.id.in_(ids)).update({"acknowledged": True}, synchronize_session=False)
+        db.commit()
+    return {"message": "Success", "acknowledged_count": len(ids)}
 
 # ── Severities ────────────────────────────────────────────────────────
 
@@ -1372,7 +1403,7 @@ async def get_charts(
         label = _build_chart_bucket(period, d.timestamp)
         if label not in buckets:
             buckets[label] = {"time": label, "emocoes": 0, "sonolencia": 0,
-                               "celular": 0, "cigarro": 0, "maos_ao_alto": 0, "arma": 0}
+                               "celular": 0, "cigarro": 0, "maos_ao_alto": 0, "arma": 0, "_sort": d.timestamp.timestamp()}
         # Normalise emotion subtypes back to the single 'emocoes' bucket
         obj = d.object_type
         if obj in EMOTION_SUBTYPES:
@@ -1380,7 +1411,11 @@ async def get_charts(
         if obj in buckets[label]:
             buckets[label][obj] += 1
 
-    sorted_data = sorted(buckets.values(), key=lambda x: x["time"])
+    sorted_data = sorted(buckets.values(), key=lambda x: x["_sort"])
+    # Delete the internal _sort key before returning
+    for item in sorted_data:
+        del item["_sort"]
+        
     return {"data": sorted_data}
 
 
@@ -1411,7 +1446,7 @@ def api_status():
         "status": "online",
         "environment": "detection",
         "python": "3.12",
-        "db": "sqlite",
+        "db": "mysql",
         "active_pipelines": active,
     }
 
@@ -1496,7 +1531,7 @@ def dispatch_webhooks(event_data: dict):
 
         for attempt in range(3):
             try:
-                resp = http_requests.get(hook.url, params=event_data, headers=headers, timeout=5)
+                resp = http_requests.post(hook.url, json=event_data, headers=headers, timeout=5)
                 if resp.status_code < 400:
                     try:
                         db = SessionLocal()
@@ -1634,6 +1669,8 @@ async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(
         "camera_name": "Câmera de Teste",
         "object_type": "emocoes",
         "confidence": 0.99,
+        "severity": "Normal",
+        "thumbnail_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEA... (test base64)",
     }
     payload_json = json.dumps(test_payload, ensure_ascii=False)
     headers = {"Content-Type": "application/json"}
@@ -1642,7 +1679,7 @@ async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(
         headers["X-Webhook-Signature"] = sig
 
     try:
-        resp = http_requests.get(hook.url, params=test_payload, headers=headers, timeout=5)
+        resp = http_requests.post(hook.url, json=test_payload, headers=headers, timeout=5)
         
         status_val = "success" if resp.status_code < 400 else "error"
         log = IntegrationLog(

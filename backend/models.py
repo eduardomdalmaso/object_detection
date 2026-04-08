@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, JSON, Float, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, JSON, Float, DateTime, Text
 from datetime import datetime
 from database import Base
 from zoneinfo import ZoneInfo
@@ -14,10 +14,10 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True, nullable=False)
-    password = Column(String, nullable=False)
-    name = Column(String, nullable=False)
-    role = Column(String, default="viewer", nullable=False)
+    username = Column(String(100), unique=True, index=True, nullable=False)
+    password = Column(String(255), nullable=False)
+    name = Column(String(200), nullable=False)
+    role = Column(String(50), default="viewer", nullable=False)
     active = Column(Boolean, default=True)
     page_permissions = Column(JSON, default=list)
 
@@ -25,23 +25,24 @@ class User(Base):
 class Camera(Base):
     __tablename__ = "cameras"
 
-    id = Column(String, primary_key=True)
-    name = Column(String, nullable=False)
-    url = Column(String, nullable=False)
-    camera_type = Column(String, default="RTSP")  # RTSP|RTMP|HTTP|ONVIF|WEBCAM
-    status = Column(String, default="offline")     # online|offline
-    detection_modes = Column(JSON, default=["emotion"])  # List of active modes: emotion|sleeping|phone|cigarette|hand
+    id = Column(String(100), primary_key=True)
+    name = Column(String(200), nullable=False)
+    url = Column(String(1000), nullable=False)
+    camera_type = Column(String(50), default="RTSP")   # RTSP|RTMP|HTTP|ONVIF|WEBCAM
+    status = Column(String(50), default="offline")      # online|offline
+    detection_modes = Column(JSON, default=["emotion"]) # List of active modes
 
 
 class Detection(Base):
     __tablename__ = "detections"
 
     id = Column(Integer, primary_key=True, index=True)
-    camera_id = Column(String, nullable=False, index=True)
-    camera_name = Column(String, nullable=False)
-    object_type = Column(String, nullable=False, index=True)  # emocoes|sonolencia|celular|cigarro|maos_ao_alto
+    camera_id = Column(String(100), nullable=False, index=True)
+    camera_name = Column(String(200), nullable=False)
+    object_type = Column(String(100), nullable=False, index=True)
     confidence = Column(Float, default=0.0)
-    severity = Column(String, default="Normal")
+    severity = Column(String(50), default="Normal")
+    acknowledged = Column(Boolean, default=False)
     timestamp = Column(DateTime, default=get_utc_minus_3, index=True)
 
 
@@ -49,10 +50,10 @@ class WebhookConfig(Base):
     __tablename__ = "webhook_configs"
 
     id = Column(Integer, primary_key=True, index=True)
-    url = Column(String, nullable=False)
-    secret = Column(String, default="")                    # HMAC-SHA256 signing secret
-    events = Column(JSON, default=["all"])                  # ["all"] or ["emocoes","celular",...]
-    cameras = Column(JSON, default=["all"])                 # ["all"] or ["cam1","cam2"]
+    url = Column(String(1000), nullable=False)
+    secret = Column(String(255), default="")
+    events = Column(JSON, default=["all"])
+    cameras = Column(JSON, default=["all"])
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=get_utc_minus_3)
 
@@ -61,21 +62,21 @@ class IntegrationLog(Base):
     __tablename__ = "integration_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    system = Column(String, nullable=False)        # e.g., "Webhook: url"
-    status = Column(String, nullable=False)        # "success" or "error"
+    system = Column(String(500), nullable=False)
+    status = Column(String(50), nullable=False)
     date = Column(DateTime, default=get_utc_minus_3, index=True)
-    message = Column(String, nullable=False)       # Request body or error detail
+    message = Column(Text, nullable=False)
 
 
 class GlobalSettings(Base):
     __tablename__ = "global_settings"
 
     id = Column(Integer, primary_key=True, default=1)
-    whatsapp = Column(String, default="559999999999")
-    phone = Column(String, default="+55 99 9999-9999")
-    support_email = Column(String, default="suporte@komtektecnologia.com.br")
-    theme = Column(String, default="light")
-    logo_url = Column(String, nullable=True)  # Base64 string
-    brand_name = Column(String, default="Gases")
-    brand_subtitle = Column(String, default="Distribuição")
+    whatsapp = Column(String(50), default="559999999999")
+    phone = Column(String(50), default="+55 99 9999-9999")
+    support_email = Column(String(200), default="suporte@komtektecnologia.com.br")
+    theme = Column(String(50), default="light")
+    logo_url = Column(Text, nullable=True)
+    brand_name = Column(String(200), default="Gases")
+    brand_subtitle = Column(String(200), default="Distribuição")
     severities = Column(JSON, default={})
