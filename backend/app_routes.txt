@@ -1,0 +1,42 @@
+🔄 Loading AI models...
+🔄 Loading MediaPipe Pose...
+✅ pose_landmarker_lite.task already exists
+✅ All AI models loaded!
+/openapi.json <class 'starlette.routing.Route'>
+/docs <class 'starlette.routing.Route'>
+/docs/oauth2-redirect <class 'starlette.routing.Route'>
+/redoc <class 'starlette.routing.Route'>
+/api/auth/login <class 'fastapi.routing.APIRoute'>
+/api/auth/logout <class 'fastapi.routing.APIRoute'>
+/api/auth/me <class 'fastapi.routing.APIRoute'>
+/api/v1/users <class 'fastapi.routing.APIRoute'>
+/api/v1/add_user <class 'fastapi.routing.APIRoute'>
+/api/v1/update_user <class 'fastapi.routing.APIRoute'>
+/api/v1/delete_user <class 'fastapi.routing.APIRoute'>
+/api/v1/cameras <class 'fastapi.routing.APIRoute'>
+/api/v1/add_camera <class 'fastapi.routing.APIRoute'>
+/api/v1/update_camera <class 'fastapi.routing.APIRoute'>
+/api/v1/delete_camera <class 'fastapi.routing.APIRoute'>
+/api/v1/test_connection_plat/{platform_id} <class 'fastapi.routing.APIRoute'>
+/video_feed <class 'fastapi.routing.APIRoute'>
+/api/v1/set_modes <class 'fastapi.routing.APIRoute'>
+/api/v1/set_mode <class 'fastapi.routing.APIRoute'>
+/api/v1/stats/{camera_id} <class 'fastapi.routing.APIRoute'>
+/api/v1/reports <class 'fastapi.routing.APIRoute'>
+/api/v1/severities <class 'fastapi.routing.APIRoute'>
+/api/v1/severities <class 'fastapi.routing.APIRoute'>
+/api/v1/reports/export/csv <class 'fastapi.routing.APIRoute'>
+/api/v1/reports/export/pdf <class 'fastapi.routing.APIRoute'>
+/api/v1/charts/{chart_key} <class 'fastapi.routing.APIRoute'>
+/api/v1/detections <class 'fastapi.routing.APIRoute'>
+/api/status <class 'fastapi.routing.APIRoute'>
+/api/v1/counts <class 'fastapi.routing.APIRoute'>
+/api/v1/webhooks <class 'fastapi.routing.APIRoute'>
+/api/v1/webhooks <class 'fastapi.routing.APIRoute'>
+/api/v1/webhooks/{webhook_id} <class 'fastapi.routing.APIRoute'>
+/api/v1/webhooks/{webhook_id} <class 'fastapi.routing.APIRoute'>
+/api/v1/webhooks/{webhook_id}/test <class 'fastapi.routing.APIRoute'>
+/api/v1/settings <class 'fastapi.routing.APIRoute'>
+/api/v1/settings <class 'fastapi.routing.APIRoute'>
+/api/v1/integration-logs <class 'fastapi.routing.APIRoute'>
+/ws/webcam/{camera_id} <class 'fastapi.routing.APIWebSocketRoute'>

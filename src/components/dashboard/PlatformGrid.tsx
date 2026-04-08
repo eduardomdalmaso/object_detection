@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { useCameraStore } from "@/store/useCameraStore";
 import { DetectionConfigModal } from "./DetectionConfigModal";
 import api from "@/lib/api";
+import { WebcamCapture } from "../WebcamCapture";
 
 /** Resolve MJPEG base URL */
 function getMjpegBaseUrl(): string {
@@ -51,33 +52,23 @@ function MjpegVideoCell({
   delayStreamUntil?: number;
   cameraType?: string;
 }) {
-  // Force a fresh key on every mount so remount always gets a new MJPEG URL
   const [hasError, setHasError] = useState(false);
   const [refreshKey, setRefreshKey] = useState(() => Date.now());
   const [delayOver, setDelayOver] = useState(delayStreamUntil <= 0 || Date.now() >= delayStreamUntil);
-  const [webcamStatus, setWebcamStatus] = useState<"idle" | "connecting" | "streaming" | "error">("idle");
-  // For WEBCAM: may be overridden by /webcam/claim to a session-specific camera_id
-  const [claimedCamId, setClaimedCamId] = useState<string>(platformId);
   const mjpegBase = getMjpegBaseUrl();
-  // Use the claimed camera_id for WEBCAM so the MJPEG stream follows the auto-assigned camera
-  const mjpegUrl = `${mjpegBase}/video_feed?plat=${encodeURIComponent(
-    cameraType === "WEBCAM" ? claimedCamId : platformId
-  )}&t=${refreshKey}`;
+  const mjpegUrl = `${mjpegBase}/video_feed?plat=${encodeURIComponent(platformId)}&t=${refreshKey}`;
+  const imgRef = useRef<HTMLImageElement>(null);
 
-  // Refs for webcam resources
-  const wsRef = useRef<WebSocket | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const intervalRef = useRef<number | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  // Guard against state updates after unmount
-  const mountedRef = useRef(true);
   useEffect(() => {
-    mountedRef.current = true;
-    // Always refresh the MJPEG URL on mount to break browser cache
-    setRefreshKey(Date.now());
-    setHasError(false);
-    return () => { mountedRef.current = false; };
+    const currentImg = imgRef.current;
+    
+    return () => {
+      // Very Important: clear the src on unmount to force the browser to abort the pending HTTP stream.
+      // Otherwise, the infinite MJPEG stream keeps the TCP connection alive and blocks the 6-conn browser limit!
+      if (currentImg) {
+        currentImg.src = "";
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -110,103 +101,12 @@ function MjpegVideoCell({
     }, 4000);
   };
 
-  // ── Auto-start webcam for WEBCAM cameras ──
-  const stopWebcam = useCallback(() => {
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-  }, []);
-
-  useEffect(() => {
-    if (cameraType !== "WEBCAM") return;
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      console.warn("getUserMedia not available — HTTPS required for webcam");
-      if (mountedRef.current) setWebcamStatus("error");
-      return;
-    }
-
-    if (mountedRef.current) setWebcamStatus("connecting");
-
-    // ── Step 1: claim a dedicated camera_id for this browser session ──
-    const sessionId = getOrCreateSessionId();
-    api.post("/api/v1/webcam/claim", { session_id: sessionId })
-      .then((res) => {
-        if (!mountedRef.current) return;
-        const assignedCamId: string = res.data.camera_id;
-        setClaimedCamId(assignedCamId);
-
-        // If a new camera was auto-created, refresh the camera list in the store
-        // so it appears in the Dashboard without requiring F5
-        if (assignedCamId !== platformId) {
-          // Trigger camera store refresh (useCameraStore.fetchCameras)
-          import("@/store/useCameraStore").then(({ useCameraStore }) => {
-            useCameraStore.getState().fetchCameras();
-          });
-        }
-
-        // Refresh MJPEG URL to use the claimed camera_id
-        setRefreshKey(Date.now());
-
-        // ── Step 2: start the camera stream ──
-        const video = document.createElement("video");
-        video.playsInline = true;
-        video.muted = true;
-        videoRef.current = video;
-        const canvas = document.createElement("canvas");
-        canvas.width = 854;
-        canvas.height = 480;
-        canvasRef.current = canvas;
-
-        navigator.mediaDevices.getUserMedia({ video: { width: 854, height: 480, facingMode: "user" }, audio: false })
-          .then((mediaStream) => {
-            if (!mountedRef.current) { mediaStream.getTracks().forEach(t => t.stop()); return; }
-            streamRef.current = mediaStream;
-            video.srcObject = mediaStream;
-            video.play();
-
-            const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-            const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/webcam/${assignedCamId}`);
-            ws.binaryType = "arraybuffer";
-            wsRef.current = ws;
-
-            ws.onopen = () => {
-              if (!mountedRef.current) { ws.close(); return; }
-              setWebcamStatus("streaming");
-              intervalRef.current = window.setInterval(() => {
-                if (ws.readyState !== WebSocket.OPEN) return;
-                const ctx = canvas.getContext("2d");
-                if (!ctx) return;
-                ctx.drawImage(video, 0, 0, 854, 480);
-                canvas.toBlob((blob) => {
-                  if (blob && ws.readyState === WebSocket.OPEN) {
-                    blob.arrayBuffer().then(buf => ws.send(buf));
-                  }
-                }, "image/jpeg", 0.65);
-              }, 125);
-            };
-
-            ws.onerror = () => { if (mountedRef.current) setWebcamStatus("error"); };
-            ws.onclose = () => { if (mountedRef.current) setWebcamStatus("idle"); };
-          })
-          .catch((err) => {
-            console.error("Webcam access error:", err);
-            if (mountedRef.current) setWebcamStatus("error");
-          });
-      })
-      .catch((err) => {
-        console.error("Webcam claim error:", err);
-        if (mountedRef.current) setWebcamStatus("error");
-      });
-
-    return () => stopWebcam();
-  }, [cameraType, platformId, stopWebcam]);
-
   const showPlaceholder = hasError || (delayStreamUntil > 0 && !delayOver);
 
   return (
     <>
       <img
+        ref={imgRef}
         src={delayOver ? mjpegUrl : undefined}
         alt={platformName}
         className={cn(
@@ -229,9 +129,7 @@ function MjpegVideoCell({
         <div className="flex flex-col items-center text-slate-500 dark:text-slate-400">
           <VideoOff className="h-10 w-10 mb-2" />
           <span className="text-xs">
-            {cameraType === "WEBCAM" && webcamStatus === "error"
-              ? "Webcam requer HTTPS"
-              : delayStreamUntil > 0 && !delayOver ? "..." : platformName}
+            {delayStreamUntil > 0 && !delayOver ? "..." : platformName}
           </span>
         </div>
       </div>
@@ -458,20 +356,26 @@ function PlatformGridComponent({
                     </div>
                   </div>
 
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedPlatform({
-                        id: platform.id,
-                        name: platform.name,
-                        modes: activeModes,
-                      });
-                    }}
-                    className="text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium flex items-center gap-1 transition-colors"
-                  >
-                    <Settings2 className="h-3.5 w-3.5" />
-                    Configurar
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {platform.cameraType === "WEBCAM" && (
+                      <WebcamCapture cameraId={platform.id} variant="compact" />
+                    )}
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedPlatform({
+                          id: platform.id,
+                          name: platform.name,
+                          modes: activeModes,
+                        });
+                      }}
+                      className="text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium flex items-center gap-1 transition-colors"
+                    >
+                      <Settings2 className="h-3.5 w-3.5" />
+                      Configurar
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

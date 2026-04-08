@@ -5,9 +5,10 @@ import { cn } from "@/lib/utils";
 interface WebcamCaptureProps {
   cameraId: string;
   className?: string;
+  variant?: "default" | "compact";
 }
 
-function WebcamCaptureComponent({ cameraId, className }: WebcamCaptureProps) {
+function WebcamCaptureComponent({ cameraId, className, variant = "default" }: WebcamCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -61,6 +62,8 @@ function WebcamCaptureComponent({ cameraId, className }: WebcamCaptureProps) {
           canvas.toBlob(
             (blob) => {
               if (blob && ws.readyState === WebSocket.OPEN) {
+                // Drop frame if backend is lagging heavily (keeps real-time tight)
+                if (ws.bufferedAmount > 1024 * 512) return;
                 blob.arrayBuffer().then((buf) => ws.send(buf));
               }
             },
@@ -116,47 +119,72 @@ function WebcamCaptureComponent({ cameraId, className }: WebcamCaptureProps) {
       <video ref={videoRef} className="hidden" playsInline muted />
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Control button */}
-      {!isStreaming ? (
+      {variant === "compact" ? (
         <button
-          onClick={startWebcam}
+          onClick={isStreaming ? stopWebcam : startWebcam}
           disabled={isLoading}
+          title={isStreaming ? "Parar Transmissão Local" : "Transmitir Webcam"}
           className={cn(
-            "flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-sm",
-            "bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            "text-xs font-medium flex items-center gap-1 transition-colors px-2 py-1 rounded",
+            isStreaming 
+              ? "bg-red-100 text-red-700 animate-pulse hover:bg-red-200" 
+              : "text-emerald-600 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-900/20",
+            isLoading && "opacity-50 cursor-not-allowed"
           )}
         >
           {isLoading ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Conectando webcam...
-            </>
+             <><Loader2 className="h-3 w-3 animate-spin" /> Conectando</>
+          ) : isStreaming ? (
+             <><VideoOff className="h-3.5 w-3.5" /> Parar</>
           ) : (
-            <>
-              <Video className="h-4 w-4" />
-              Iniciar Webcam
-            </>
+             <>📡 Transmitir</>
           )}
         </button>
       ) : (
-        <button
-          onClick={stopWebcam}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold bg-red-600 text-white hover:bg-red-700 transition-all shadow-sm"
-        >
-          <VideoOff className="h-4 w-4" />
-          Parar Webcam
-        </button>
-      )}
+        <>
+          {/* Control button Default */}
+          {!isStreaming ? (
+            <button
+              onClick={startWebcam}
+              disabled={isLoading}
+              className={cn(
+                "flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-sm",
+                "bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              )}
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Conectando webcam...
+                </>
+              ) : (
+                <>
+                  <Video className="h-4 w-4" />
+                  Iniciar Webcam
+                </>
+              )}
+            </button>
+          ) : (
+            <button
+              onClick={stopWebcam}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold bg-red-600 text-white hover:bg-red-700 transition-all shadow-sm"
+            >
+              <VideoOff className="h-4 w-4" />
+              Parar Webcam
+            </button>
+          )}
 
-      {isStreaming && (
-        <div className="flex items-center gap-2 text-xs text-emerald-600 font-medium animate-pulse">
-          <span className="w-2 h-2 rounded-full bg-emerald-500" />
-          Transmitindo webcam ao vivo — visualize no painel principal
-        </div>
-      )}
+          {isStreaming && (
+            <div className="flex items-center gap-2 text-xs text-emerald-600 font-medium animate-pulse">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              Transmitindo webcam ao vivo — visualize no painel principal
+            </div>
+          )}
 
-      {error && (
-        <p className="text-xs text-red-500 font-medium">{error}</p>
+          {error && (
+            <p className="text-xs text-red-500 font-medium">{error}</p>
+          )}
+        </>
       )}
     </div>
   );

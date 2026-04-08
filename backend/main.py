@@ -230,6 +230,7 @@ class CameraPipeline:
         # Thread control
         self._running = False
         self._thread = None
+        self._inference_thread = None
 
     @property
     def pose_landmarker(self):
@@ -257,12 +258,15 @@ class CameraPipeline:
             self.latest_frame = resized.copy()
 
     def start(self):
-        """Start the camera reading thread (skipped for WEBCAM — uses inject_frame)."""
+        """Start the camera pipeline threads."""
         if self._running:
             return
         self._running = True
+
+        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._inference_thread.start()
+
         if self.camera_type == "WEBCAM":
-            # WEBCAM cameras receive frames via WebSocket, no reader thread needed
             self._update_status("online")
             print(f"▶️  Pipeline started for WEBCAM '{self.camera_name}' ({self.camera_id}) — awaiting browser frames")
         else:
@@ -271,12 +275,34 @@ class CameraPipeline:
             print(f"▶️  Pipeline started for camera '{self.camera_name}' ({self.camera_id})")
 
     def stop(self):
-        """Stop the camera reading thread."""
+        """Stop the camera pipeline threads."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        if self._inference_thread:
+            self._inference_thread.join(timeout=5)
+            self._inference_thread = None
         print(f"⏹️  Pipeline stopped for camera '{self.camera_name}' ({self.camera_id})")
+
+    def _inference_loop(self):
+        """Dedicated thread to run AI inference at a controlled FPS to save CPU."""
+        while self._running:
+            with self.frame_lock:
+                frame = self.latest_frame.copy() if self.latest_frame is not None else None
+            
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            
+            # Process AI (expensive operation)
+            annotated = self.process_frame(frame)
+            
+            with self.frame_lock:
+                self.last_annotated = annotated.copy()
+            
+            # Throttle inference to ~10 FPS
+            time.sleep(0.1)
 
     def _reader_loop(self):
         """Continuously read frames from the camera source."""
@@ -544,25 +570,25 @@ class CameraPipeline:
             print(f"⚠️ Failed to save detection for {self.camera_id}: {e}")
 
     def generate_mjpeg(self):
-        """Generate MJPEG stream frames for this camera."""
-        frame_counter = 0
-        skip_rate = 3
+        """Generate MJPEG stream frames for this camera. Pure lightweight forwarder."""
         while True:
             with self.frame_lock:
-                if self.latest_frame is None:
-                    time.sleep(0.03)
-                    continue
-                frame = self.latest_frame.copy()
+                if self.last_annotated is not None:
+                    annotated = self.last_annotated.copy()
+                elif self.latest_frame is not None:
+                    annotated = self.latest_frame.copy()
+                else:
+                    annotated = None
 
-            frame_counter += 1
-            if frame_counter % skip_rate == 0:
-                annotated = self.process_frame(frame)
-                self.last_annotated = annotated.copy()
-            else:
-                annotated = self.last_annotated.copy() if self.last_annotated is not None else frame.copy()
+            if annotated is None:
+                time.sleep(0.05)
+                continue
 
-            _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            _, buffer = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            
+            # Cap the stream yield rate strictly to prevent runaway Starlette loops pushing 1000fps and breaking browser rendering/network
+            time.sleep(0.06)
 
     def get_stats(self):
         """Return current stats based on active detection mode."""
@@ -927,44 +953,6 @@ async def delete_camera(request: Request, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Camera deleted"}
 
-
-@app.post("/api/v1/webcam/claim")
-async def webcam_claim(request: Request, db: Session = Depends(get_db)):
-    """
-    Auto-register a WEBCAM camera for a browser session.
-    Each browser generates a unique session_id (stored in localStorage).
-    First call creates a Camera record; subsequent calls return the existing one.
-    No authentication required — anyone with network access can claim a webcam slot.
-    """
-    body = await request.json()
-    session_id = body.get("session_id", "").strip()
-    if not session_id or len(session_id) < 8:
-        raise HTTPException(status_code=400, detail="session_id must be at least 8 characters")
-
-    # Derive a stable camera_id from the session_id
-    safe_id = "".join(c for c in session_id if c.isalnum() or c == "-")[:20]
-    cam_id = f"webcam-{safe_id}"
-
-    cam = db.query(Camera).filter(Camera.id == cam_id).first()
-    if not cam:
-        # Auto-create the camera record
-        label = session_id[:8].upper()
-        cam = Camera(
-            id=cam_id,
-            name=f"Webcam {label}",
-            url="0",
-            camera_type="WEBCAM",
-            status="offline",
-            detection_modes=["emotion"],
-        )
-        db.add(cam)
-        db.commit()
-        db.refresh(cam)
-        # Start the processing pipeline immediately
-        start_pipeline(cam.id, cam.name, cam.url, cam.camera_type, cam.detection_modes)
-        print(f"🖥️  Auto-created WEBCAM camera '{cam.name}' (session: {session_id[:12]})")
-
-    return {"camera_id": cam.id, "camera_name": cam.name, "created": False}
 
 
 @app.get("/api/v1/test_connection_plat/{platform_id}")
