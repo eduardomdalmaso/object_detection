@@ -171,7 +171,7 @@ export default function ApiDocs() {
         <div className="bg-slate-900 rounded-lg p-4 font-mono text-xs text-blue-300 overflow-x-auto">
           <span className="text-slate-500">// Configuração Axios</span><br />
           {`const api = axios.create({`}<br />
-          {`  baseURL: 'http://localhost:8000',`}<br />
+          {`  baseURL: 'http://localhost:8005',`}<br />
           {`  withCredentials: true,`}<br />
           {`  headers: { 'Content-Type': 'application/json' }`}<br />
           {`});`}
@@ -270,8 +270,8 @@ export default function ApiDocs() {
             pm2 restart all --update-env
           </div>
           <ul className="list-disc list-inside space-y-1 ml-2 text-xs">
-            <li><strong>Backend:</strong> FastAPI + Uvicorn na porta 8000</li>
-            <li><strong>Frontend:</strong> Vite Dev Server na porta 5173 (proxy → 8000)</li>
+            <li><strong>Backend:</strong> FastAPI + Uvicorn na porta 8005</li>
+            <li><strong>Frontend:</strong> Vite Dev Server na porta 5173 (proxy → 8005)</li>
             <li><strong>Banco:</strong> SQLite em <code className="bg-secondary px-1 rounded">backend/app.db</code></li>
           </ul>
           <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-100 dark:border-amber-800">

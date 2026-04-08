@@ -33,50 +33,50 @@ export default defineConfig({
     // Uses VITE_API_URL from .env.development (default: localhost:5000)
     proxy: {
       '/api': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       // Some endpoints are not under /api (if any), add them explicitly here
       '/get_report_data': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       // Forward zone management and direct media endpoints to Flask during dev
       '/get_zones': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       '/set_zones': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       '/video_feed': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       '/snapshot': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       '/public_video_feed': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
       },
       '/socket.io': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
         ws: true,
       },
       '/ws': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8005',
         changeOrigin: true,
         secure: false,
         ws: true,

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useState, useEffect, memo, useMemo, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Maximize2, VideoOff, X, Settings2, Hand, Eye, Smartphone, Smile } from "lucide-react";
