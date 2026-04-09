@@ -754,10 +754,9 @@ class LoginRequest(BaseModel):
 
 def _get_session_user(request: Request, db: Session):
     token = request.cookies.get("session_token")
-    if not token or token not in SESSIONS:
+    if not token:
         return None
-    uid = SESSIONS[token]
-    return db.query(User).filter(User.id == uid).first()
+    return db.query(User).filter(User.session_token == token).first()
 
 
 # ── Auth ────────────────────────────────────────────────────────
@@ -768,7 +767,8 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     if not user or user.password != body.password:
         raise HTTPException(status_code=401, detail={"error": "Invalid credentials"})
     token = secrets.token_hex(32)
-    SESSIONS[token] = user.id
+    user.session_token = token
+    db.commit()
     response = JSONResponse({"user": {"id": user.id, "name": user.name, "username": user.username,
                                        "role": user.role, "page_permissions": user.page_permissions}})
     response.set_cookie(key="session_token", value=token, httponly=True, samesite="lax", max_age=86400)
@@ -776,10 +776,13 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 
 
 @app.post("/api/auth/logout")
-async def logout(request: Request):
+async def logout(request: Request, db: Session = Depends(get_db)):
     token = request.cookies.get("session_token")
-    if token and token in SESSIONS:
-        del SESSIONS[token]
+    if token:
+        user = db.query(User).filter(User.session_token == token).first()
+        if user:
+            user.session_token = None
+            db.commit()
     response = JSONResponse({"message": "Logged out"})
     response.delete_cookie("session_token")
     return response
