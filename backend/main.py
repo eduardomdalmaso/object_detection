@@ -555,6 +555,19 @@ class CameraPipeline:
             db.commit()
             db.close()
 
+            # Capture frame for webhook thumbnail
+            thumbnail_base64 = None
+            with self.frame_lock:
+                frame_to_encode = None
+                if self.last_annotated is not None:
+                    frame_to_encode = self.last_annotated
+                elif self.latest_frame is not None:
+                    frame_to_encode = self.latest_frame
+
+            if frame_to_encode is not None:
+                _, buffer = cv2.imencode('.jpg', frame_to_encode, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                thumbnail_base64 = base64.b64encode(buffer).decode('utf-8')
+
             # Dispatch webhooks in background
             event_data = {
                 "event": "detection",
@@ -564,6 +577,7 @@ class CameraPipeline:
                 "object_type": object_type,
                 "confidence": round(min(confidence, 1.0), 4),
                 "severity": severity,
+                "thumbnail_base64": thumbnail_base64,
             }
             threading.Thread(target=dispatch_webhooks, args=(event_data,), daemon=True).start()
         except Exception as e:
@@ -1496,7 +1510,7 @@ def dispatch_webhooks(event_data: dict):
 
         for attempt in range(3):
             try:
-                resp = http_requests.get(hook.url, params=event_data, headers=headers, timeout=5)
+                resp = http_requests.post(hook.url, json=event_data, headers=headers, timeout=5)
                 if resp.status_code < 400:
                     try:
                         db = SessionLocal()
@@ -1634,6 +1648,7 @@ async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(
         "camera_name": "Câmera de Teste",
         "object_type": "emocoes",
         "confidence": 0.99,
+        "thumbnail_base64": "",
     }
     payload_json = json.dumps(test_payload, ensure_ascii=False)
     headers = {"Content-Type": "application/json"}
@@ -1642,7 +1657,7 @@ async def test_webhook(webhook_id: int, request: Request, db: Session = Depends(
         headers["X-Webhook-Signature"] = sig
 
     try:
-        resp = http_requests.get(hook.url, params=test_payload, headers=headers, timeout=5)
+        resp = http_requests.post(hook.url, json=test_payload, headers=headers, timeout=5)
         
         status_val = "success" if resp.status_code < 400 else "error"
         log = IntegrationLog(
