@@ -15,6 +15,32 @@ import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '@/store/useAuthStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
+import { useWebcamStore } from '@/store/useWebcamStore';
+
+const WebcamIndicator = () => {
+    const isStreaming = useWebcamStore((s) => s.isStreaming);
+    const requestStop = useWebcamStore((s) => s.requestStop);
+
+    if (!isStreaming) return null;
+
+    return (
+        <div className="mx-4 mb-4 bg-red-500/10 border border-red-500/20 rounded-lg p-3 flex items-center justify-between animate-in fade-in slide-in-from-top-2">
+            <div className="flex items-center gap-2">
+                <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                </span>
+                <span className="text-xs font-semibold text-red-500">Webcam Ativa</span>
+            </div>
+            <button 
+                onClick={requestStop}
+                className="text-[10px] font-bold text-slate-400 hover:text-white bg-slate-800/50 hover:bg-red-500 px-2 py-1 rounded transition-colors"
+            >
+                PARAR
+            </button>
+        </div>
+    );
+};
 
 const Sidebar = () => {
     const location = useLocation();
@@ -62,6 +88,9 @@ const Sidebar = () => {
                     </div>
                 </div>
             </div>
+
+            {/* Global Webcam Indicator */}
+            <WebcamIndicator />
 
             {/* Navigation */}
             <nav className="flex-1 px-4 space-y-1">

@@ -2,12 +2,14 @@ import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import { useState } from 'react';
 import { Menu } from 'lucide-react';
+import { GlobalWebcamProvider } from './GlobalWebcamProvider';
 
 export function Layout() {
     const [mobileOpen, setMobileOpen] = useState(false);
 
     return (
         <div className="flex h-screen bg-background transition-colors duration-300">
+            <GlobalWebcamProvider />
             {/* Desktop sidebar */}
             <div className="hidden lg:flex">
                 <Sidebar />
