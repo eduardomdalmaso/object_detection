@@ -76,6 +76,6 @@ class GlobalSettings(Base):
     support_email = Column(String(255), default="suporte@komtektecnologia.com.br")
     theme = Column(String(50), default="light")
     logo_url = Column(String(2048), nullable=True)  # Base64 string
-    brand_name = Column(String(255), default="Gases")
-    brand_subtitle = Column(String(255), default="Distribuição")
+    brand_name = Column(String(255), default="k-Monitor")
+    brand_subtitle = Column(String(255), default="Security OMS")
     severities = Column(JSON, default={})
