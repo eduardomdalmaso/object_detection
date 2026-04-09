@@ -115,15 +115,19 @@ const endpoints = [
   },
   {
     method: 'WEBHOOK',
-    path: 'GET /sua-url-configurada?event=detection&timestamp=2026-03-24T11:40:00Z...',
+    path: 'POST /sua-url-configurada',
     category: 'Webhooks',
-    description: 'Os eventos são enviados via GET usando query parameters. Configurado na aba Webhooks.',
-    body: `?event=detection
-&timestamp=2026-03-24T11:40:00Z
-&camera_id=cam1
-&camera_name=C\u00e2mera+Entrada
-&object_type=celular
-&confidence=0.92`,
+    description: 'Os eventos são enviados via POST usando um payload JSON. Configurado na aba Webhooks.',
+    body: `{
+  "event": "detection",
+  "timestamp": "2026-03-24T11:40:00Z...",
+  "camera_id": "cam1",
+  "camera_name": "Câmera Entrada",
+  "object_type": "celular",
+  "confidence": 0.92,
+  "severity": "Normal",
+  "thumbnail_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEA..."
+}`,
   },
 ];
 
@@ -139,9 +143,26 @@ export default function ApiDocs() {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
   const copyToClipboard = (text: string, idx: number) => {
-    navigator.clipboard.writeText(text);
-    setCopiedIdx(idx);
-    setTimeout(() => setCopiedIdx(null), 1500);
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text);
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx(null), 1500);
+    } else {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "absolute";
+      textArea.style.opacity = "0";
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        setCopiedIdx(idx);
+        setTimeout(() => setCopiedIdx(null), 1500);
+      } catch (err) {
+        console.error('Copy fallback failed', err);
+      }
+      document.body.removeChild(textArea);
+    }
   };
 
   const categories = [...new Set(endpoints.map((e) => e.category))];
@@ -171,7 +192,7 @@ export default function ApiDocs() {
         <div className="bg-slate-900 rounded-lg p-4 font-mono text-xs text-blue-300 overflow-x-auto">
           <span className="text-slate-500">// Configuração Axios</span><br />
           {`const api = axios.create({`}<br />
-          {`  baseURL: 'http://localhost:8000',`}<br />
+          {`  baseURL: 'http://localhost:8005',`}<br />
           {`  withCredentials: true,`}<br />
           {`  headers: { 'Content-Type': 'application/json' }`}<br />
           {`});`}
@@ -270,8 +291,8 @@ export default function ApiDocs() {
             pm2 restart all --update-env
           </div>
           <ul className="list-disc list-inside space-y-1 ml-2 text-xs">
-            <li><strong>Backend:</strong> FastAPI + Uvicorn na porta 8000</li>
-            <li><strong>Frontend:</strong> Vite Dev Server na porta 5173 (proxy → 8000)</li>
+            <li><strong>Backend:</strong> FastAPI + Uvicorn na porta 8005</li>
+            <li><strong>Frontend:</strong> Vite Dev Server na porta 5173 (proxy → 8005)</li>
             <li><strong>Banco:</strong> SQLite em <code className="bg-secondary px-1 rounded">backend/app.db</code></li>
           </ul>
           <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-100 dark:border-amber-800">
