@@ -20,6 +20,7 @@ class User(Base):
     role = Column(String(50), default="viewer", nullable=False)
     active = Column(Boolean, default=True)
     page_permissions = Column(JSON, default=list)
+    session_token = Column(String(255), nullable=True)
 
 
 class Camera(Base):

@@ -754,9 +754,12 @@ class LoginRequest(BaseModel):
 
 def _get_session_user(request: Request, db: Session):
     token = request.cookies.get("session_token")
+    print(f"DEBUG AUTH: token inside cookies = {token}")
     if not token:
         return None
-    return db.query(User).filter(User.session_token == token).first()
+    user = db.query(User).filter(User.session_token == token).first()
+    print(f"DEBUG AUTH: query result = {user}")
+    return user
 
 
 # ── Auth ────────────────────────────────────────────────────────
