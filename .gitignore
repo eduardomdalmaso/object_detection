@@ -52,3 +52,5 @@ vite.config.ts.timestamp-*
 Miniconda3-latest-Linux-x86_64.sh
 *.sh
 venv/
+# Banco de dados local antigo
+app.db

@@ -9,3 +9,6 @@ mediapipe
 numpy
 dlib
 torch
+pymysql
+python-dotenv
+cryptography

@@ -1,13 +1,19 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
+from dotenv import load_dotenv
 
-_DB_DIR = os.path.dirname(os.path.abspath(__file__))
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{os.path.join(_DB_DIR, 'app.db')}"
+load_dotenv()
 
-# connect_args={"check_same_thread": False} is needed only for SQLite
+# Fallback para o usuário e senha informados, usando a API pymysql para MySQL
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://admin:admin@127.0.0.1:3306/object_detection")
+
+# pool_size e max_overflow ajudam a lidar com múltiplas detecções simultâneas sem sofrer gargalo.
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+    SQLALCHEMY_DATABASE_URL,
+    pool_size=20,
+    max_overflow=10,
+    pool_recycle=3600
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
