@@ -56,9 +56,11 @@ function GlobalWebcamProviderComponent() {
       ws.onopen = () => {
         setStreamingState(true, false, null);
 
-        // 3. Send frames at ~10 FPS
+        // 3. Send frames at ~5 FPS (prototype matches 200ms logic)
+        let isEncoding = false;
         intervalRef.current = window.setInterval(() => {
           if (!videoRef.current || !canvasRef.current || ws.readyState !== WebSocket.OPEN) return;
+          if (isEncoding) return;
 
           const canvas = canvasRef.current;
           const ctx = canvas.getContext("2d");
@@ -68,18 +70,29 @@ function GlobalWebcamProviderComponent() {
           canvas.height = 480;
           ctx.drawImage(videoRef.current, 0, 0, 854, 480);
 
+          isEncoding = true;
           canvas.toBlob(
             (blob) => {
               if (blob && ws.readyState === WebSocket.OPEN) {
                 // Drop frame if backend is lagging heavily (keeps real-time tight)
-                if (ws.bufferedAmount > 1024 * 512) return;
-                blob.arrayBuffer().then((buf) => ws.send(buf));
+                if (ws.bufferedAmount > 1024 * 256) {
+                   isEncoding = false;
+                   return;
+                }
+                blob.arrayBuffer().then((buf) => {
+                  ws.send(buf);
+                  isEncoding = false;
+                }).catch(() => {
+                  isEncoding = false;
+                });
+              } else {
+                isEncoding = false;
               }
             },
             "image/jpeg",
-            0.7
+            0.65
           );
-        }, 100); // 10 FPS
+        }, 200); // 5 FPS
       };
 
       ws.onclose = () => {
